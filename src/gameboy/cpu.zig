@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const CPUError = error{InvalidRegisterName};
+
 // use @bitcast to convert a byte to a field and then back again
 const Flags = packed struct { _dead_bits: u4, carry: u1, half_carry: u1, subtraction: u1, zero: u1 };
 
@@ -10,19 +12,55 @@ const Operand8 = union {
     addr: void,
 };
 
-// NOTE: returns byte at address HL -----------v
-const Register8 = enum(u4) { l, h, e, d, c, b, hl, a };
-const Register16 = enum(u2) { hl, de, bc, af };
+pub const Register8 = enum(u4) {
+    l,
+    h,
+    e,
+    d,
+    c,
+    b,
+    // NOTE: returns byte at address HL
+    hl,
+    a,
+
+    pub fn from_str(str: []const u8) CPUError!Register8 {
+        inline for (@typeInfo(Register8).Enum.fields) |fld| {
+            if (std.mem.eql(u8, str, fld.name)) return @enumFromInt(fld.value);
+        }
+
+        return CPUError.InvalidRegisterName;
+    }
+};
+
+pub const Register16 = enum(u3) {
+    hl,
+    de,
+    bc,
+    af,
+    sp,
+
+    pub fn from_str(str: []const u8) CPUError!Register16 {
+        inline for (@typeInfo(Register16).Enum.fields) |fld| {
+            if (std.mem.eql(u8, str, fld.name)) return @enumFromInt(fld.value);
+        }
+
+        return CPUError.InvalidRegisterName;
+    }
+};
 
 pub const CPU = struct {
-    // Assuming DMG startup state  0 1 2 3 4 5 6 7   and   0  1  2  3
-    // Registers are indexed as    L H E D C B F A        HL DE BC AF
+    // Assuming DMG startup state  0 1 2 3 4 5 6 7   and   0  1  2  3  4
+    // Registers are indexed as    L H E D C B F A        HL DE BC AF SP
     registers: [8]u8 = [_]u8{0} ** 8,
     pc: u16 = 0x0100,
     sp: u16 = 0xFFFE,
 
     // TODO: Rework Memory
     memory: [0xFFFF]u8 = [_]u8{0} ** 0xFFFF,
+
+    state: enum {
+        Running,
+    },
 
     // Accessors
     // read a word/byte from memory
@@ -42,29 +80,43 @@ pub const CPU = struct {
 
     // get a pointer to register r16
     pub fn fetch_word(self: *CPU, r16: Register16) *u16 {
-        const idx: u3 = @intCast(@intFromEnum(r16));
-        return @ptrCast(@alignCast(&self.registers[idx * 2]));
+        switch (r16) {
+            .sp => return &self.sp,
+            else => {
+                const idx: u3 = @intCast(@intFromEnum(r16));
+                return @ptrCast(@alignCast(&self.registers[idx * 2]));
+            },
+        }
+    }
+
+    // step the CPU forward by one instruction
+    pub fn step(self: *CPU) usize {
+        switch (self.state) {
+            .Running => {
+                const opcode = self.memory[self.pc];
+            },
+        }
     }
 };
 
 const testing = std.testing;
 
 test "register8_intFromEnum" {
-    try testing.expectEqual(0, @intFromEnum(CPU.Register8.l));
-    try testing.expectEqual(1, @intFromEnum(CPU.Register8.h));
-    try testing.expectEqual(2, @intFromEnum(CPU.Register8.e));
-    try testing.expectEqual(3, @intFromEnum(CPU.Register8.d));
-    try testing.expectEqual(4, @intFromEnum(CPU.Register8.c));
-    try testing.expectEqual(5, @intFromEnum(CPU.Register8.b));
-    try testing.expectEqual(6, @intFromEnum(CPU.Register8.hl));
-    try testing.expectEqual(7, @intFromEnum(CPU.Register8.a));
+    try testing.expectEqual(0, @intFromEnum(Register8.l));
+    try testing.expectEqual(1, @intFromEnum(Register8.h));
+    try testing.expectEqual(2, @intFromEnum(Register8.e));
+    try testing.expectEqual(3, @intFromEnum(Register8.d));
+    try testing.expectEqual(4, @intFromEnum(Register8.c));
+    try testing.expectEqual(5, @intFromEnum(Register8.b));
+    try testing.expectEqual(6, @intFromEnum(Register8.hl));
+    try testing.expectEqual(7, @intFromEnum(Register8.a));
 }
 
 test "register16_intFromEnum" {
-    try testing.expectEqual(0, @intFromEnum(CPU.Register16.hl));
-    try testing.expectEqual(1, @intFromEnum(CPU.Register16.de));
-    try testing.expectEqual(2, @intFromEnum(CPU.Register16.bc));
-    try testing.expectEqual(3, @intFromEnum(CPU.Register16.af));
+    try testing.expectEqual(0, @intFromEnum(Register16.hl));
+    try testing.expectEqual(1, @intFromEnum(Register16.de));
+    try testing.expectEqual(2, @intFromEnum(Register16.bc));
+    try testing.expectEqual(3, @intFromEnum(Register16.af));
 }
 
 test "get_register8" {
@@ -119,4 +171,15 @@ test "memory" {
 
     try testing.expectEqual(0xBEEF, word.*);
     try testing.expectEqual(0x69, byte.*);
+}
+
+test "parse register8" {
+    const r8 = try Register8.from_str("a");
+    try testing.expectEqual(r8, Register8.a);
+
+    var err = Register8.from_str("A");
+    try testing.expectError(CPUError.InvalidRegisterName, err);
+
+    err = Register8.from_str("Z");
+    try testing.expectError(CPUError.InvalidRegisterName, err);
 }

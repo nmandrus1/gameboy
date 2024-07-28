@@ -3,5 +3,5 @@ const gameboy = @import("gameboy");
 
 // Launch the emulator
 pub fn main() !void {
-    gameboy.run();
+    try gameboy.run();
 }
