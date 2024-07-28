@@ -49,6 +49,10 @@ pub const Register16 = enum(u3) {
 };
 
 pub const CPU = struct {
+    const State = enum {
+        Running,
+    };
+
     // Assuming DMG startup state  0 1 2 3 4 5 6 7   and   0  1  2  3  4
     // Registers are indexed as    L H E D C B F A        HL DE BC AF SP
     registers: [8]u8 = [_]u8{0} ** 8,
@@ -58,9 +62,7 @@ pub const CPU = struct {
     // TODO: Rework Memory
     memory: [0xFFFF]u8 = [_]u8{0} ** 0xFFFF,
 
-    state: enum {
-        Running,
-    },
+    state: State = .Running,
 
     // Accessors
     // read a word/byte from memory
@@ -93,7 +95,7 @@ pub const CPU = struct {
     pub fn step(self: *CPU) usize {
         switch (self.state) {
             .Running => {
-                const opcode = self.memory[self.pc];
+                _ = self.memory[self.pc];
             },
         }
     }
