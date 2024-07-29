@@ -17,24 +17,28 @@ pub const OpcodeError = error{
 };
 
 // Address knows what data it needs to build the address type
-const Address = union(enum) {
+pub const Address = enum {
     // 16 bit register
-    r16: cpu.Register16,
+    bc,
+    de,
+    hl,
+    hli,
+    hld,
     // 16 bit immediate data
-    a16: void,
+    a16,
     // 8 bit immediate data
-    a8: void,
+    a8,
     // 8 bit register, in 8 bit LD instructions
     // its only ever the C register
-    r8: cpu.Register8,
+    c,
 };
 
-const LoadOperand = union(enum) {
+pub const LoadOperand = union(enum) {
     r8: cpu.Register8,
     r16: cpu.Register16,
     address: Address,
-    immediate8: void,
-    immediate16: void,
+    imm8: void,
+    imm16: void,
     // special case
     sp_offset: void,
 
@@ -48,57 +52,56 @@ const LoadOperand = union(enum) {
             return switch (case) {
                 .a, .b, .c, .d, .e, .h, .l => .{ .r8 = try cpu.Register8.from_str(op.name) },
                 .bc, .de, .hl, .sp => .{ .r16 = try cpu.Register16.from_str(op.name) },
-                .n16 => .immediate16,
-                .n8 => .immediate8,
+                .n16 => .imm16,
+                .n8 => .imm8,
             };
         } else {
-            const Case = enum { c, bc, de, hl, a8, a16 };
-            const case = std.meta.stringToEnum(Case, op.name) orelse return OpcodeError.InvalidOperandName;
-            return switch (case) {
-                .c => .{ .address = .{ .r8 = cpu.Register8.c } },
-                .bc, .de, .hl => .{ .address = .{ .r16 = try cpu.Register16.from_str(op.name) } },
-                .a8 => .{ .address = Address.a8 },
-                .a16 => .{ .address = Address.a16 },
-            };
+            const case = std.meta.stringToEnum(Address, op.name) orelse return OpcodeError.InvalidOperandName;
+            return .{ .address = case };
         }
     }
 };
 
-const LoadInstruction = union(enum) {
-    load: Load,
-    stack_op: StackOperation,
+pub const StackOperation = struct {
+    const Op = enum {
+        push,
+        pop,
+    };
 
-    fn from_json_opcode(opcode: JsonOpcode) !LoadInstruction {
-        const Case = enum { LD, LDH, POP, PUSH };
-        const case = std.meta.stringToEnum(Case, opcode.mnemonic) orelse return OpcodeError.UnknownMnemonic;
-        return switch (case) {
-            .POP, .PUSH => .{ .stack_op = try StackOperation.from_json_opcode(opcode) },
-            else => .{ .load = try Load.from_json_Opcode(opcode) },
-        };
-    }
-};
-
-const StackOperation = union(enum) {
-    push: cpu.Register16,
-    pop: cpu.Register16,
+    r16: cpu.Register16,
+    op: Op,
 
     fn from_json_opcode(opcode: JsonOpcode) !StackOperation {
         const Case = enum { PUSH, POP };
         const case = std.meta.stringToEnum(Case, opcode.mnemonic) orelse return OpcodeError.InvalidOperandName;
+        const r16 = try cpu.Register16.from_str(opcode.operands[0].name);
         return switch (case) {
-            .PUSH => .{ .push = try cpu.Register16.from_str(opcode.operands[0].name) },
-            .POP => .{ .pop = try cpu.Register16.from_str(opcode.operands[0].name) },
+            .PUSH => .{ .op = Op.push, .r16 = r16 },
+            .POP => .{ .op = Op.pop, .r16 = r16 },
         };
     }
 };
 
-const Load = struct {
+pub const Load = struct {
     src: LoadOperand,
     dest: LoadOperand,
     cycles: usize,
     bytes: usize,
 
-    fn from_json_Opcode(opcode: JsonOpcode) !Load {
+    // fn from_json_opcode_expr(opcode: JsonOpcode) !Load {
+    //     if (opcode.immediate) {
+    //         return Load{
+    //             .dest = try LoadOperand.from_json_operand(opcode.operands[0]),
+    //             .src = try LoadOperand.from_json_operand(opcode.operands[1]),
+    //             .cycles = opcode.cycles[0],
+    //             .bytes = opcode.bytes,
+    //         };
+    //     } else {
+
+    //     }
+    // }
+
+    fn from_json_opcode(opcode: JsonOpcode) !Load {
         const dest = try LoadOperand.from_json_operand(opcode.operands[0]);
         var src = try LoadOperand.from_json_operand(opcode.operands[1]);
 
@@ -114,6 +117,12 @@ const Load = struct {
             .bytes = opcode.bytes,
         };
     }
+};
+
+pub const Instruction = union(enum) {
+    Load: Load,
+    // Push/Pop
+    StackOp: StackOperation,
 };
 
 const JsonOperand = struct {
@@ -187,14 +196,14 @@ test "LoadOperand - immediate8 operand" {
     const json_operand = JsonOperand{ .name = "n8", .immediate = true };
     const result = try LoadOperand.from_json_operand(json_operand);
 
-    try testing.expectEqual(LoadOperand.immediate8, @as(std.meta.Tag(LoadOperand), result));
+    try testing.expectEqual(LoadOperand.imm8, @as(std.meta.Tag(LoadOperand), result));
 }
 
 test "LoadOperand - immediate16 operand" {
     const json_operand = JsonOperand{ .name = "n16", .immediate = true };
     const result = try LoadOperand.from_json_operand(json_operand);
 
-    try testing.expectEqual(LoadOperand.immediate16, @as(std.meta.Tag(LoadOperand), result));
+    try testing.expectEqual(LoadOperand.imm16, @as(std.meta.Tag(LoadOperand), result));
 }
 
 test "LoadOperand - address operands" {
@@ -208,12 +217,12 @@ test "LoadOperand - address operands" {
     };
 
     const expected_results = [_]LoadOperand{
-        .{ .address = .{ .r16 = .hl } },
-        .{ .address = .{ .r16 = .bc } },
-        .{ .address = .{ .r16 = .de } },
+        .{ .address = .hl },
+        .{ .address = .bc },
+        .{ .address = .de },
         .{ .address = .a8 },
         .{ .address = .a16 },
-        .{ .address = .{ .r8 = .c } },
+        .{ .address = .c },
     };
 
     for (json_operands, expected_results) |json_op, expected| {
@@ -237,25 +246,30 @@ test "Parse all load instructions" {
 
     var successful_decodes: usize = 0;
     var attempted_decodes: usize = 0;
+
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+
     for (parsed.value.unprefixed) |opcode| {
 
         // catch multiple opcodes that we are interested in testing
         const Instrs = enum { LD, LDH, PUSH, POP };
-        _ = std.meta.stringToEnum(Instrs, opcode.mnemonic) orelse continue;
+        const case = std.meta.stringToEnum(Instrs, opcode.mnemonic) orelse continue;
 
         attempted_decodes += 1;
 
-        var buf = std.ArrayList(u8).init(testing.allocator);
-        defer buf.deinit();
+        const decode_successful = switch (case) {
+            .LD, .LDH => if (Load.from_json_opcode(opcode)) |_| true else |_| false,
+            .PUSH, .POP => if (StackOperation.from_json_opcode(opcode)) |_| true else |_| false,
+        };
 
-        _ = LoadInstruction.from_json_opcode(opcode) catch {
+        if (decode_successful) successful_decodes += 1 else {
             try std.json.stringify(opcode, .{}, buf.writer());
             std.log.err("Failed to decode: {s}", .{buf.items});
 
             buf.clearRetainingCapacity();
-        };
-
-        successful_decodes += 1;
+            continue;
+        }
     }
 
     try testing.expectEqual(100, attempted_decodes);

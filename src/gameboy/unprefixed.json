@@ -745,8 +745,7 @@
 			],
 			"operands": [
 				{
-					"name": "hl",
-					"increment": true,
+					"name": "hli",
 					"immediate": false
 				},
 				{
@@ -928,8 +927,7 @@
 					"immediate": true
 				},
 				{
-					"name": "hl",
-					"increment": true,
+					"name": "hli",
 					"immediate": false
 				}
 			],
@@ -1102,8 +1100,7 @@
 			],
 			"operands": [
 				{
-					"name": "hl",
-					"decrement": true,
+					"name": "hld",
 					"immediate": false
 				},
 				{
@@ -1284,8 +1281,7 @@
 					"immediate": true
 				},
 				{
-					"name": "hl",
-					"decrement": true,
+					"name": "hld",
 					"immediate": false
 				}
 			],
