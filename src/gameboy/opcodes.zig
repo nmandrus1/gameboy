@@ -119,10 +119,77 @@ pub const Load = struct {
     }
 };
 
+pub const AddOperand = union(enum) {
+    r8: cpu.Register8,
+    r16: cpu.Register16,
+    hl_addr: void,
+    imm8: void,
+    e8: void,
+
+    pub fn from_json_operand(op: JsonOperand) !AddOperand {
+        const Case = enum { a, b, c, d, e, h, l, n8, hl, bc, de, sp };
+        const case = std.meta.stringToEnum(Case, op.name) orelse return error.InvalidOperandName;
+
+        return switch (case) {
+            .a,
+            .b,
+            .c,
+            .d,
+            .e,
+            .h,
+            .l,
+            => .{ .r8 = try cpu.Register8.from_str(op.name) },
+            .n8 => .{ .imm8 = {} },
+            .e8 => .{ .e8 = {} },
+            .bc, .de, .sp => .{ .r16 = try cpu.Register16.from_str(op.name) },
+            .hl => if (op.immediate) .{ .r16 = cpu.Register16.hl } else .{ .hl_addr = {} },
+        };
+    }
+};
+
+pub const Add = struct {
+    src: AddOperand,
+    dest: AddOperand,
+    with_carry: bool,
+    cycles: usize,
+    bytes: usize,
+
+    pub fn from_json_opcode(op: JsonOpcode) !Add {
+        return Add{ .dest = AddOperand.from_json_operand(op.operands[0]), .src = AddOperand.from_json_operand(op.operands[1]), .cycles = op.cycles[0], .bytes = op.bytes, .with_carry = std.mem.eql(u8, "ADC", op.mnemonic) };
+    }
+};
+
+pub const Increment = struct {
+    dest: union(enum) {
+        r8: cpu.Register8,
+        r16: cpu.Register16,
+        hl_addr: void,
+    },
+
+    bytes: usize = 1,
+    cycles: usize = 8,
+
+    fn from_json_opcode(op: JsonOpcode) !Increment {
+        const Case = enum { a, b, c, d, e, h, l, hl, bc, de, sp };
+        const case = std.meta.stringToEnum(Case, op.operands[0].name);
+        return switch (case) {
+            .a, .b, .c, .d, .e, .h, .l => .{ .r8 = try cpu.Register8.from_str(op.operands[0].name) },
+            .bc, .de, .sp => .{ .r16 = try cpu.Register16.from_str(op.operands[0].name) },
+            .hl => if (op.immedate) .{ .r16 = cpu.Register16.hl } else .{ .hl_addr = {} },
+        };
+    }
+};
+
+pub const Decrement = Increment;
+
 pub const Instruction = union(enum) {
     Load: Load,
     // Push/Pop
     StackOp: StackOperation,
+    // ADD/ADC
+    Add: Add,
+    Inc: Increment,
+    Dec: Decrement,
 };
 
 const JsonOperand = struct {
