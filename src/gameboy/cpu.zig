@@ -20,6 +20,14 @@ pub const CPUError = error{
 
 // Operand for an 8 bit instruction
 pub const Register8 = enum(u4) {
+    // a,
+    // hl,
+    // b,
+    // c,
+    // d,
+    // e,
+    // h,
+    // l,
     l,
     h,
     e,
@@ -41,6 +49,12 @@ pub const Register16 = enum(u3) {
     bc,
     af,
     sp,
+
+    // af,
+    // bc,
+    // de,
+    // hl,
+    // sp,
 
     pub fn from_str(str: []const u8) CPUError!Register16 {
         return std.meta.stringToEnum(Register16, str) orelse return CPUError.InvalidRegisterName;
@@ -101,8 +115,22 @@ pub const CPU = struct {
 
     // Accessors
     // read a word/byte from memory
-    pub fn read(self: *CPU, comptime T: type, addr: u16) *T {
-        return @ptrCast(@alignCast(&self.memory[addr]));
+    pub fn mem_read(self: *CPU, comptime T: type, addr: u16) *T {
+        return switch (T) {
+            u8 => &self.memory[addr],
+            u16 => @ptrCast(@alignCast(&self.memory[addr])),
+            else => @compileError("Unsupported type for read"),
+        };
+    }
+
+    // Simple load funciton, ultimately any load operation boils down to this
+    // my goal is to have any "load" instruction eventually call this
+    pub fn write(comptime T: type, dest: *T, src: T) void {
+        switch (T) {
+            u8 => dest.* = src,
+            u16 => std.mem.writeInt(u16, @ptrCast(@alignCast(dest)), src, .little),
+            else => @compileError("Invliad type for write"),
+        }
     }
 
     /// Given an address struct this returns a u16 pointer to
@@ -136,7 +164,7 @@ pub const CPU = struct {
     pub fn get_r8(self: *CPU, r8: Register8) *u8 {
         return switch (r8) {
             // read byte at the address pointed to by HL register
-            .hl => self.read(u8, self.get_r16(.hl).*),
+            .hl => self.mem_read(u8, self.get_r16(.hl).*),
             // otherwise read register
             else => &self.registers[@intFromEnum(r8)],
         };
@@ -170,7 +198,8 @@ pub const CPU = struct {
         comptime if (@typeInfo(T).Int.bits > 16) @compileError("Invalid type -- 8 or 16 bit integer");
 
         defer self.pc += @divExact(@typeInfo(T).Int.bits, 8);
-        return std.mem.readInt(T, @ptrCast(&self.memory[self.pc]), .little);
+        // return std.mem.readInt(T, @ptrCast(&self.memory[self.pc]), .little);
+        return self.mem_read(T, self.pc).*;
     }
 
     // step the CPU forward by one instruction
@@ -218,14 +247,14 @@ pub const CPU = struct {
         self.sp -= 2;
         // push is just a load operation
         // convince zig that this pointer to a byte is a pointer to a u16
-        CPU.load(u16, @ptrCast(@alignCast(&self.memory[self.sp])), value);
+        CPU.write(u16, @ptrCast(@alignCast(&self.memory[self.sp])), value);
     }
 
     // pop a value from the stack
     pub fn stackPop(self: *CPU, ptr: *u16) void {
         defer self.sp += 2;
         // pop is just a load operation
-        CPU.load(u16, ptr, std.mem.readInt(u16, @ptrCast(self.memory[self.sp .. self.sp + 2]), .little));
+        CPU.write(u16, ptr, std.mem.readInt(u16, @ptrCast(self.memory[self.sp .. self.sp + 2]), .little));
     }
 
     pub fn executeStackOp(self: *CPU, op: StackOp) usize {
@@ -243,20 +272,20 @@ pub const CPU = struct {
                 const src = self.fetchLoadData(u8, op.src);
                 const dest = switch (op.dest) {
                     .r8 => |r8| self.get_r8(r8),
-                    .address => |addr| self.read(u8, self.address_ptr(addr)),
+                    .address => |addr| self.mem_read(u8, self.address_ptr(addr)),
                     else => unreachable,
                 };
-                CPU.load(u8, dest, src);
+                CPU.write(u8, dest, src);
             },
             // 16 bit load
             .r16, .imm16, .sp_offset => {
                 const src = self.fetchLoadData(u16, op.src);
                 const dest = switch (op.dest) {
                     .r16 => |r16| self.get_r16(r16),
-                    .address => |addr| self.read(u16, self.address_ptr(addr)),
+                    .address => |addr| self.mem_read(u16, self.address_ptr(addr)),
                     else => unreachable,
                 };
-                CPU.load(u16, dest, src);
+                CPU.write(u16, dest, src);
             },
         }
 
@@ -270,7 +299,7 @@ pub const CPU = struct {
             u8 => switch (operand) {
                 .r8 => |r8| self.get_r8(r8).*,
                 // TODO: find a way to better express the posibilty of an addr pointing to a u16
-                .address => |addr| self.read(u8, self.address_ptr(addr)).*,
+                .address => |addr| self.mem_read(u8, self.address_ptr(addr)).*,
                 .imm8 => self.pc_read(u8),
                 else => unreachable,
             },
@@ -285,13 +314,6 @@ pub const CPU = struct {
             },
             else => unreachable,
         };
-    }
-
-    // Simple load funciton, ultimately any load operation boils down to this
-    // my goal is to have any "load" instruction eventually call this
-    pub fn load(comptime T: type, dest: *T, src: T) void {
-        comptime if (!(T == u8 or T == u16)) @compileError("Invalid type -- expected u8 or u16");
-        std.mem.writeInt(T, @ptrCast(@alignCast(dest)), src, .little);
     }
 
     pub fn executeAdd(self: *CPU, add_instr: Add) usize {
@@ -374,8 +396,8 @@ pub const CPU = struct {
 
     fn executeDec(self: *CPU, dec_instr: Decrement) usize {
         switch (dec_instr.dest) {
-            .r8 => |r8| self.inc(u8, self.get_r8(r8)),
-            .r16 => |r16| self.inc(u16, self.get_r16(r16)),
+            .r8 => |r8| self.dec(u8, self.get_r8(r8)),
+            .r16 => |r16| self.dec(u16, self.get_r16(r16)),
         }
 
         return dec_instr.cycles;
@@ -517,17 +539,20 @@ pub const CPU = struct {
     /// return the Zero, Carry, Half-Carry, and Substraction flags, and it is up
     /// to the caller to ensure that the proper flags based on the return value
     pub fn sub(dest: *u8, rhs: u8) Flags {
-        const lhs = dest.*;
+        const B3 = 0b00001000;
+        const B7 = 0b10000000;
 
-        const lhs_lower: u4 = @truncate(lhs);
-        const rhs_lower: u4 = @truncate(rhs);
+        const init_b3: u1 = @truncate((dest.* & B3) >> 3);
+        const init_b7: u1 = @truncate((dest.* & B7) >> 7);
 
-        const half_carry = @subWithOverflow(lhs_lower, rhs_lower).@"1";
+        dest.* -%= rhs;
 
-        const result = @subWithOverflow(lhs, rhs);
-        dest.* = result.@"0";
-        const zero: u1 = if (result.@"0" == 0) 1 else 0;
-        return Flags{ .carry = result.@"1", .zero = zero, .half_carry = half_carry, .subtraction = 1 };
+        const new_b3: u1 = @truncate((dest.* & B3) >> 3);
+        const new_b7: u1 = @truncate((dest.* & B7) >> 7);
+
+        const zero: u1 = if (dest.* == 0) 1 else 0;
+        // XOR relevant bits to see if they changed,
+        return Flags{ .carry = init_b7 ^ new_b7, .zero = zero, .half_carry = init_b3 ^ new_b3, .subtraction = 1 };
     }
 
     /// Add to the A register, the carry flag, and the associated data
@@ -575,10 +600,10 @@ pub const CPU = struct {
         const SB = 0xFF01;
         const SC = 0xFF01;
 
-        const serial_control = self.read(u8, SC);
+        const serial_control = self.mem_read(u8, SC);
         if (serial_control.* == 0x81) {
             // transfer requested
-            _ = writer.write(&.{self.read(u8, SB).*}) catch unreachable;
+            _ = writer.write(&.{self.mem_read(u8, SB).*}) catch unreachable;
             serial_control.* = 0x01;
         }
     }
@@ -606,15 +631,15 @@ test "register16_intFromEnum" {
 
 test "get_register8" {
     var cpu = CPU{};
-    // register[7] = A
-    cpu.registers[7] = 0x0A;
-    cpu.registers[6] = 0x0F;
-    cpu.registers[5] = 0x0B;
-    cpu.registers[4] = 0x0C;
-    cpu.registers[3] = 0x0D;
-    cpu.registers[2] = 0x0E;
-    cpu.registers[1] = 0x06;
-    cpu.registers[0] = 0x09;
+
+    cpu.registers[@intFromEnum(Register8.a)] = 0x0A;
+    cpu.registers[@intFromEnum(Register8.a) - 1] = 0x0F;
+    cpu.registers[@intFromEnum(Register8.b)] = 0x0B;
+    cpu.registers[@intFromEnum(Register8.c)] = 0x0C;
+    cpu.registers[@intFromEnum(Register8.d)] = 0x0D;
+    cpu.registers[@intFromEnum(Register8.e)] = 0x0E;
+    cpu.registers[@intFromEnum(Register8.h)] = 0x06;
+    cpu.registers[@intFromEnum(Register8.l)] = 0x09;
 
     try testing.expectEqual(0x0A, cpu.get_r8(.a).*);
     try testing.expectEqual(0x0B, cpu.get_r8(.b).*);
@@ -627,14 +652,15 @@ test "get_register8" {
 
 test "get_register16" {
     var cpu = CPU{};
-    cpu.registers[7] = 0x0A;
-    cpu.registers[6] = 0x0F;
-    cpu.registers[5] = 0x0B;
-    cpu.registers[4] = 0x0C;
-    cpu.registers[3] = 0x0D;
-    cpu.registers[2] = 0x0E;
-    cpu.registers[1] = 0x06;
-    cpu.registers[0] = 0x09;
+
+    cpu.registers[@intFromEnum(Register8.a)] = 0x0A;
+    cpu.registers[@intFromEnum(Register8.a) - 1] = 0x0F;
+    cpu.registers[@intFromEnum(Register8.b)] = 0x0B;
+    cpu.registers[@intFromEnum(Register8.c)] = 0x0C;
+    cpu.registers[@intFromEnum(Register8.d)] = 0x0D;
+    cpu.registers[@intFromEnum(Register8.e)] = 0x0E;
+    cpu.registers[@intFromEnum(Register8.h)] = 0x06;
+    cpu.registers[@intFromEnum(Register8.l)] = 0x09;
 
     try testing.expectEqual(0x0A0F, cpu.get_r16(.af).*);
     try testing.expectEqual(0x0B0C, cpu.get_r16(.bc).*);
@@ -651,8 +677,8 @@ test "memory" {
 
     cpu.memory[0x202] = 0x69;
 
-    const word = cpu.read(u16, 0x200);
-    const byte = cpu.read(u8, 0x202);
+    const word = cpu.mem_read(u16, 0x200);
+    const byte = cpu.mem_read(u8, 0x202);
 
     try testing.expectEqual(0xBEEF, word.*);
     try testing.expectEqual(0x69, byte.*);
@@ -860,7 +886,7 @@ test "NOP instruction" {
     defer cpu.deinit();
 
     const initial_pc = cpu.pc;
-    cpu.read(u8, cpu.pc).* = 0x00;
+    cpu.mem_read(u8, cpu.pc).* = 0x00;
     const cycles = cpu.step();
 
     try testing.expectEqual(@as(usize, 4), cycles);
@@ -922,7 +948,7 @@ test "PUSH and POP instructions" {
     _ = cpu.execute(push_bc);
 
     try testing.expectEqual(initial_sp - 2, cpu.sp);
-    try testing.expectEqual(@as(u16, 0x1234), std.mem.readInt(u16, @ptrCast(&cpu.memory[cpu.sp .. cpu.sp + 2]), .little));
+    try testing.expectEqual(@as(u16, 0x1234), cpu.mem_read(u16, cpu.sp).*);
 
     cpu.get_r16(.bc).* = 0;
     const pop_bc = Instruction{ .StackOp = .{
@@ -1062,14 +1088,15 @@ test "Jump instructions" {
     cpu.flag_state().zero = 0;
     _ = cpu.execute(jp_z_a16);
 
-    try testing.expectEqual(initial_pc + 3, cpu.pc);
+    // initial pc starts at the address for immediate data
+    try testing.expectEqual(initial_pc + 2, cpu.pc);
 }
 
 test "Call and Return instructions" {
     var cpu = try setupCPU();
     defer cpu.deinit();
 
-    const initial_pc = cpu.pc;
+    const initial_pc = cpu.pc; // = 0x0100
     const initial_sp = cpu.sp;
 
     // Test CALL instruction
@@ -1078,13 +1105,13 @@ test "Call and Return instructions" {
         .bytes = 3,
         .cycles = &[_]usize{24},
     } };
-    cpu.memory[cpu.pc] = 0x34;
-    cpu.memory[cpu.pc + 1] = 0x12;
-    _ = cpu.execute(call_a16);
+    cpu.memory[cpu.pc] = 0x34; // memory[0x0100] = 0x34
+    cpu.memory[cpu.pc + 1] = 0x12; // memory[0x0101] = 0x12
+    _ = cpu.execute(call_a16); // memory[0x0102...] = ...
 
     try testing.expectEqual(@as(u16, 0x1234), cpu.pc);
     try testing.expectEqual(initial_sp - 2, cpu.sp);
-    try testing.expectEqual(initial_pc + 3, std.mem.readInt(u16, @ptrCast(&cpu.memory[cpu.sp .. cpu.sp + 2]), .little));
+    try testing.expectEqual(initial_pc + 2, cpu.mem_read(u16, cpu.sp).*);
 
     // Test RET instruction
     const ret = Instruction{ .Return = .{
@@ -1094,7 +1121,7 @@ test "Call and Return instructions" {
     } };
     _ = cpu.execute(ret);
 
-    try testing.expectEqual(initial_pc + 3, cpu.pc);
+    try testing.expectEqual(initial_pc + 2, cpu.pc);
     try testing.expectEqual(initial_sp, cpu.sp);
 }
 
