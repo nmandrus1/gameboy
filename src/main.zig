@@ -1,7 +1,41 @@
 const std = @import("std");
 const gameboy = @import("gameboy");
 
-// Launch the emulator
 pub fn main() !void {
-    try gameboy.run();
+    // Get an allocator
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Get the arguments
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    // Check if a filename was provided
+    if (args.len < 2) {
+        std.debug.print("Usage: {s} <rom_file>\n", .{args[0]});
+        return error.InvalidArgument;
+    }
+
+    const filename = args[1];
+
+    // Open the file
+    const file = try std.fs.cwd().openFile(filename, .{});
+    defer file.close();
+
+    // Get the file size
+    const file_size = try file.getEndPos();
+
+    // Allocate memory for the ROM data
+    const rom_data = try allocator.alloc(u8, file_size);
+    defer allocator.free(rom_data);
+
+    // Read the file contents into the slice
+    const bytes_read = try file.readAll(rom_data);
+
+    if (bytes_read != file_size) {
+        return error.IncompleteRead;
+    }
+
+    try gameboy.run(rom_data, allocator);
 }

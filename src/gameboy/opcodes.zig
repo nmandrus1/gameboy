@@ -3,7 +3,7 @@ const json = std.json;
 const cpu = @import("cpu.zig");
 
 const opcode_json = @embedFile("Opcodes.json");
-const unprefixed = @embedFile("unprefixed.json");
+const unprefixed_json = @embedFile("unprefixed.json");
 
 // GOAL: the goal of this module is to develop an Opcode Jump table, where
 // each entry in the table knows exactly what data it needs to
@@ -63,21 +63,21 @@ pub const LoadOperand = union(enum) {
 };
 
 pub const StackOperation = struct {
-    const Op = enum {
-        push,
-        pop,
+    const Op = union(enum) {
+        push: cpu.Register16,
+        pop: cpu.Register16,
     };
 
-    r16: cpu.Register16,
     op: Op,
+    cycles: usize,
 
     fn from_json_opcode(opcode: JsonOpcode) !StackOperation {
         const Case = enum { PUSH, POP };
         const case = std.meta.stringToEnum(Case, opcode.mnemonic) orelse return OpcodeError.InvalidOperandName;
         const r16 = try cpu.Register16.from_str(opcode.operands[0].name);
         return switch (case) {
-            .PUSH => .{ .op = Op.push, .r16 = r16 },
-            .POP => .{ .op = Op.pop, .r16 = r16 },
+            .PUSH => .{ .op = Op{ .push = r16 }, .cycles = opcode.cycles[0] },
+            .POP => .{ .op = Op{ .pop = r16 }, .cycles = opcode.cycles[0] },
         };
     }
 };
@@ -122,12 +122,11 @@ pub const Load = struct {
 pub const AddOperand = union(enum) {
     r8: cpu.Register8,
     r16: cpu.Register16,
-    hl_addr: void,
     imm8: void,
     e8: void,
 
     pub fn from_json_operand(op: JsonOperand) !AddOperand {
-        const Case = enum { a, b, c, d, e, h, l, n8, hl, bc, de, sp };
+        const Case = enum { a, b, c, d, e, h, l, n8, e8, hl, bc, de, sp };
         const case = std.meta.stringToEnum(Case, op.name) orelse return error.InvalidOperandName;
 
         return switch (case) {
@@ -142,7 +141,7 @@ pub const AddOperand = union(enum) {
             .n8 => .{ .imm8 = {} },
             .e8 => .{ .e8 = {} },
             .bc, .de, .sp => .{ .r16 = try cpu.Register16.from_str(op.name) },
-            .hl => if (op.immediate) .{ .r16 = cpu.Register16.hl } else .{ .hl_addr = {} },
+            .hl => if (op.immediate) .{ .r16 = cpu.Register16.hl } else .{ .r8 = .hl },
         };
     }
 };
@@ -155,7 +154,7 @@ pub const Add = struct {
     bytes: usize,
 
     pub fn from_json_opcode(op: JsonOpcode) !Add {
-        return Add{ .dest = AddOperand.from_json_operand(op.operands[0]), .src = AddOperand.from_json_operand(op.operands[1]), .cycles = op.cycles[0], .bytes = op.bytes, .with_carry = std.mem.eql(u8, "ADC", op.mnemonic) };
+        return Add{ .dest = try AddOperand.from_json_operand(op.operands[0]), .src = try AddOperand.from_json_operand(op.operands[1]), .cycles = op.cycles[0], .bytes = op.bytes, .with_carry = std.mem.eql(u8, "ADC", op.mnemonic) };
     }
 };
 
@@ -163,7 +162,6 @@ pub const Increment = struct {
     dest: union(enum) {
         r8: cpu.Register8,
         r16: cpu.Register16,
-        hl_addr: void,
     },
 
     bytes: usize = 1,
@@ -171,18 +169,180 @@ pub const Increment = struct {
 
     fn from_json_opcode(op: JsonOpcode) !Increment {
         const Case = enum { a, b, c, d, e, h, l, hl, bc, de, sp };
-        const case = std.meta.stringToEnum(Case, op.operands[0].name);
+        const case = std.meta.stringToEnum(Case, op.operands[0].name) orelse return OpcodeError.InvalidDestName;
         return switch (case) {
-            .a, .b, .c, .d, .e, .h, .l => .{ .r8 = try cpu.Register8.from_str(op.operands[0].name) },
-            .bc, .de, .sp => .{ .r16 = try cpu.Register16.from_str(op.operands[0].name) },
-            .hl => if (op.immedate) .{ .r16 = cpu.Register16.hl } else .{ .hl_addr = {} },
+            .a, .b, .c, .d, .e, .h, .l => .{ .dest = .{ .r8 = try cpu.Register8.from_str(op.operands[0].name) } },
+            .bc, .de, .sp => .{ .dest = .{ .r16 = try cpu.Register16.from_str(op.operands[0].name) } },
+            .hl => if (op.immediate) .{ .dest = .{ .r16 = cpu.Register16.hl } } else .{ .dest = .{ .r8 = .hl } },
         };
     }
 };
 
 pub const Decrement = Increment;
 
+pub const ByteOperand = union(enum) {
+    r8: cpu.Register8,
+    imm8: void,
+
+    pub fn from_json_operand(op: JsonOperand) !ByteOperand {
+        const Case = enum { a, b, c, d, e, h, l, hl, n8 };
+        const case = std.meta.stringToEnum(Case, op.name) orelse return error.InvalidOperandName;
+
+        return switch (case) {
+            .n8 => .{ .imm8 = {} },
+            else => .{ .r8 = try cpu.Register8.from_str(op.name) },
+        };
+    }
+};
+
+pub const ByteArithmetic = struct {
+    const ALUOps = union(enum) { SUB: ByteOperand, SBC: ByteOperand, AND: ByteOperand, OR: ByteOperand, XOR: ByteOperand, CP: ByteOperand, CCF: void, SCF: void, DAA: void, CPL: void };
+
+    operation: ALUOps,
+
+    bytes: usize,
+    cycles: usize,
+
+    pub fn from_json_opcode(op: JsonOpcode) !ByteArithmetic {
+        const Case = std.meta.Tag(ALUOps);
+        const case = std.meta.stringToEnum(Case, op.mnemonic) orelse return error.UnknownMnemonic;
+
+        const operation = switch (case) {
+            .SUB => ALUOps{ .SUB = try ByteOperand.from_json_operand(op.operands[1]) },
+            .SBC => ALUOps{ .SBC = try ByteOperand.from_json_operand(op.operands[1]) },
+            .AND => ALUOps{ .AND = try ByteOperand.from_json_operand(op.operands[1]) },
+            .OR => ALUOps{ .OR = try ByteOperand.from_json_operand(op.operands[1]) },
+            .XOR => ALUOps{ .XOR = try ByteOperand.from_json_operand(op.operands[1]) },
+            .CP => ALUOps{ .CP = try ByteOperand.from_json_operand(op.operands[1]) },
+            .CCF => ALUOps{ .CCF = {} },
+            .SCF => ALUOps{ .SCF = {} },
+            .DAA => ALUOps{ .DAA = {} },
+            .CPL => ALUOps{ .CPL = {} },
+        };
+
+        return ByteArithmetic{
+            .operation = operation,
+            .bytes = op.bytes,
+            .cycles = op.cycles[0],
+        };
+    }
+};
+
+pub const Jump = struct {
+    pub const Condition = enum {
+        unconditional,
+        nz,
+        z,
+        nc,
+        c,
+    };
+
+    const JumpOperand = union(enum) {
+        hl: Condition,
+        a16: Condition,
+        e8: Condition,
+    };
+
+    operand: JumpOperand,
+    bytes: usize,
+    // cycles[0] = condition == true
+    // cycles[1] = condition == false
+    cycles: []const usize,
+
+    pub fn from_json_opcode(op: JsonOpcode) !Jump {
+        // first identify condition
+
+        var operand_idx: u8 = 0;
+        const cc = if (op.operands.len == 1) Condition.unconditional else blk: {
+            operand_idx = 1;
+            const Case = enum { nz, z, nc, c };
+            const case = std.meta.stringToEnum(Case, op.operands[0].name) orelse return error.InvalidOperandName;
+            break :blk @as(Condition, switch (case) {
+                .nz => .nz,
+                .z => .z,
+                .nc => .nc,
+                .c => .c,
+            });
+        };
+
+        const operand_type = std.meta.stringToEnum(std.meta.Tag(JumpOperand), op.operands[operand_idx].name) orelse return error.InvalidOperandName;
+        return Jump{
+            .operand = switch (operand_type) {
+                .hl => .{ .hl = cc },
+                .a16 => .{ .a16 = cc },
+                .e8 => .{ .e8 = cc },
+            },
+            // .operand = comptime @unionInit(JumpOperand, @tagName(operand_type), cc),
+            .bytes = op.bytes,
+            .cycles = op.cycles,
+        };
+    }
+};
+
+pub const Call = struct {
+    const Condition = Jump.Condition;
+
+    condition: Condition,
+    bytes: usize,
+    cycles: []const usize,
+
+    fn from_json_opcode(op: JsonOpcode) !Call {
+        // first identify condition
+
+        var operand_idx: u8 = 0;
+        const cc: Condition = if (op.operands.len == 1) .unconditional else blk: {
+            operand_idx = 1;
+            const Case = enum { nz, z, nc, c };
+            const case = std.meta.stringToEnum(Case, op.operands[0].name) orelse return error.InvalidOperandName;
+            break :blk @as(Condition, switch (case) {
+                .nz => .nz,
+                .z => .z,
+                .nc => .nc,
+                .c => .c,
+            });
+        };
+
+        return Call{
+            .condition = cc,
+            .bytes = op.bytes,
+            .cycles = op.cycles,
+        };
+    }
+};
+
+pub const Return = struct {
+    const Condition = Jump.Condition;
+
+    condition: Condition,
+    bytes: usize,
+    cycles: []const usize,
+
+    fn from_json_opcode(op: JsonOpcode) !Return {
+        // first identify condition
+
+        var operand_idx: u8 = 0;
+        const cc: Condition = if (op.operands.len == 0) .unconditional else blk: {
+            operand_idx = 1;
+            const Case = enum { nz, z, nc, c };
+            const case = std.meta.stringToEnum(Case, op.operands[0].name) orelse return error.InvalidOperandName;
+            break :blk @as(Condition, switch (case) {
+                .nz => .nz,
+                .z => .z,
+                .nc => .nc,
+                .c => .c,
+            });
+        };
+
+        return Return{
+            .condition = cc,
+            .bytes = op.bytes,
+            .cycles = op.cycles,
+        };
+    }
+};
+
 pub const Instruction = union(enum) {
+    Nop: void,
     Load: Load,
     // Push/Pop
     StackOp: StackOperation,
@@ -190,6 +350,46 @@ pub const Instruction = union(enum) {
     Add: Add,
     Inc: Increment,
     Dec: Decrement,
+    ALUOp: ByteArithmetic,
+    Jump: Jump,
+    Call: Call,
+    Return: Return,
+
+    pub fn from_json_opcode(op: JsonOpcode) !Instruction {
+        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RET };
+
+        // if we dont support the instruction don't try to decode it
+        const case = std.meta.stringToEnum(Instructions, op.mnemonic) orelse return error.UnknownMnemonic; // {
+        // try std.json.stringify(op, .{}, buf.writer());
+        // std.log.err("No attempt to decode: {s}", .{buf.items});
+
+        // buf.clearRetainingCapacity();
+        // continue;
+        // };
+
+        // {
+        // errdefer { // on error print debuf info
+        //     std.json.stringify(op, .{}, buf.writer()) catch unreachable;
+        //     std.log.err("Instruction Not Parsed: {s}", .{buf.items});
+
+        //     buf.clearRetainingCapacity();
+        //     decode_successful = false;
+        // }
+
+        return switch (case) {
+            .NOP => .{ .Nop = {} },
+            .LD, .LDH => .{ .Load = try Load.from_json_opcode(op) },
+            .PUSH, .POP => .{ .StackOp = try StackOperation.from_json_opcode(op) },
+            .ADD, .ADC => .{ .Add = try Add.from_json_opcode(op) },
+            .INC => .{ .Inc = try Increment.from_json_opcode(op) },
+            .DEC => .{ .Dec = try Decrement.from_json_opcode(op) },
+            .SUB, .SBC, .AND, .OR, .XOR, .CP, .CCF, .SCF, .DAA, .CPL => .{ .ALUOp = try ByteArithmetic.from_json_opcode(op) },
+            .JP, .JR => .{ .Jump = try Jump.from_json_opcode(op) },
+            .CALL => .{ .Call = try Call.from_json_opcode(op) },
+            .RET => .{ .Return = try Return.from_json_opcode(op) },
+        };
+        // }
+    }
 };
 
 const JsonOperand = struct {
@@ -211,14 +411,52 @@ const Opcodes = struct {
     cbprefixed: [256]JsonOpcode,
 };
 
-pub fn make_jump_table() !Opcodes {
-    var buf = [_]u8{0} ** 4096;
-    var fba = std.heap.FixedBufferAllocator.init(buf[0..buf.len]);
-    const allocator = fba.allocator();
+pub const UnprefixedOpcodes = struct {
+    // const JsonTable = std.AutoArrayHashMap([4]u8, JsonOpcode);
+    byte_to_str: [256][4]u8 = undefined,
+    table: [256]JsonOpcode,
+    inner_alloc: std.heap.ArenaAllocator,
 
-    const parsed = try json.parseFromSlice(Opcodes, allocator, opcode_json, .{ .ignore_unknown_fields = true });
-    return parsed.value;
-}
+    pub fn init(alloc: std.mem.Allocator) !UnprefixedOpcodes {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+
+        const allocator = arena.allocator();
+
+        var parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, unprefixed_json, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
+        const unprefixed = parsed.object.get("unprefixed").?.object;
+
+        var byte_to_str: [256][4]u8 = undefined;
+        inline for (&byte_to_str, 0..) |*str, op| {
+            str[0] = '0';
+            str[1] = 'x';
+            _ = std.fmt.formatIntBuf(@ptrCast(str[2..4]), op, 16, .upper, .{});
+        }
+
+        var json_op_iterator = unprefixed.iterator();
+        var table: [256]JsonOpcode = undefined;
+
+        for (0..256) |idx| {
+            const entry = json_op_iterator.next() orelse {
+                std.log.err("Json iterator stopped early at idx: {d}", .{idx});
+                return error.IteratorEndedEarly;
+            };
+
+            const json_opcode = try std.json.parseFromValueLeaky(JsonOpcode, allocator, entry.value_ptr.*, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
+            table[idx] = json_opcode;
+        }
+
+        return UnprefixedOpcodes{
+            .byte_to_str = byte_to_str,
+            .table = table,
+            .inner_alloc = arena,
+        };
+    }
+
+    pub fn deinit(self: *UnprefixedOpcodes) void {
+        self.inner_alloc.deinit();
+    }
+};
 
 const testing = std.testing;
 
@@ -230,12 +468,57 @@ fn parse_and_compare(slc: []const u8, expected: JsonOpcode) !void {
 }
 
 test "parse_unprefixed" {
-    const UnprefixedOpcodes = struct {
-        unprefixed: [256]JsonOpcode,
-    };
+    var unprefixed = try UnprefixedOpcodes.init(testing.allocator);
+    defer unprefixed.deinit();
 
-    const parsed = try json.parseFromSlice(UnprefixedOpcodes, testing.allocator, unprefixed, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
-    defer parsed.deinit();
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+
+    var successful_decodes: u16 = 0;
+    var attempted_decodes: u16 = 0;
+
+    const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, ADC, INC, DEC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RET };
+    for (0..256) |opcode| {
+
+        // if we dont support the instruction don't try to decode it
+        const op = unprefixed.table[opcode];
+        const case = std.meta.stringToEnum(Instructions, op.mnemonic) orelse {
+            try std.json.stringify(op, .{}, buf.writer());
+            std.log.warn("No attempt to decode: {s}", .{buf.items});
+
+            buf.clearRetainingCapacity();
+            continue;
+        };
+
+        attempted_decodes += 1;
+
+        var decode_successful: bool = true;
+
+        {
+            errdefer { // on error print debuf info
+                std.json.stringify(op, .{}, buf.writer()) catch unreachable;
+                std.log.err("Instruction Not Parsed: {s}", .{buf.items});
+
+                buf.clearRetainingCapacity();
+                decode_successful = false;
+            }
+
+            _ = switch (case) {
+                .NOP => {},
+                .LD, .LDH => try Load.from_json_opcode(op),
+                .PUSH, .POP => try StackOperation.from_json_opcode(op),
+                .ADD, .ADC => try Add.from_json_opcode(op),
+                .INC => try Increment.from_json_opcode(op),
+                .DEC => try Decrement.from_json_opcode(op),
+                .SUB, .SBC, .AND, .OR, .XOR, .CP, .CCF, .SCF, .DAA, .CPL => try ByteArithmetic.from_json_opcode(op),
+                .JP, .JR => try Jump.from_json_opcode(op),
+                .CALL => try Call.from_json_opcode(op),
+                .RET => try Return.from_json_opcode(op),
+            };
+        }
+
+        if (decode_successful) successful_decodes += 1 else continue;
+    }
 }
 
 test "LoadOperand8bit - register operands" {
@@ -301,44 +584,4 @@ test "LoadOperand - address operands" {
 test "LoadOperand - invalid operand" {
     const json_operand = JsonOperand{ .name = "invalid", .immediate = true };
     try testing.expectError(OpcodeError.InvalidOperandName, LoadOperand.from_json_operand(json_operand));
-}
-
-test "Parse all load instructions" {
-    const UnprefixedOpcodes = struct {
-        unprefixed: [256]JsonOpcode,
-    };
-
-    const parsed = try json.parseFromSlice(UnprefixedOpcodes, testing.allocator, unprefixed, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
-    defer parsed.deinit();
-
-    var successful_decodes: usize = 0;
-    var attempted_decodes: usize = 0;
-
-    var buf = std.ArrayList(u8).init(testing.allocator);
-    defer buf.deinit();
-
-    for (parsed.value.unprefixed) |opcode| {
-
-        // catch multiple opcodes that we are interested in testing
-        const Instrs = enum { LD, LDH, PUSH, POP };
-        const case = std.meta.stringToEnum(Instrs, opcode.mnemonic) orelse continue;
-
-        attempted_decodes += 1;
-
-        const decode_successful = switch (case) {
-            .LD, .LDH => if (Load.from_json_opcode(opcode)) |_| true else |_| false,
-            .PUSH, .POP => if (StackOperation.from_json_opcode(opcode)) |_| true else |_| false,
-        };
-
-        if (decode_successful) successful_decodes += 1 else {
-            try std.json.stringify(opcode, .{}, buf.writer());
-            std.log.err("Failed to decode: {s}", .{buf.items});
-
-            buf.clearRetainingCapacity();
-            continue;
-        }
-    }
-
-    try testing.expectEqual(100, attempted_decodes);
-    try testing.expectEqual(100, successful_decodes);
 }
