@@ -109,6 +109,9 @@ const Scheduler = struct {
                     if (cpu.pc == cpu.memory.len) break :blk .Quit;
                     _ = try stdin.readUntilDelimiter(&buf, '\n');
                     scheduler.cycles += cpu.step();
+
+                    // quit emulator if we have passed arbitrary cycle limit (testing)
+                    if (scheduler.cycles > 1000) break :blk .Quit;
                 }
                 break :blk next.event_type;
             };

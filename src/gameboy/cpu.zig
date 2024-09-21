@@ -125,7 +125,7 @@ pub const CPU = struct {
     }
 
     pub fn doctorLog(self: *CPU) void {
-        std.log.info("A: {X} F: {X} B: {X} C: {X} D: {X} E: {X} H: {X} L: {X} SP: {X} PC: {X} PCMEM:{X},{X},{X},{X} ", .{
+        std.log.info("A:{X:0>2} F:{X:0>2} B:{X:0>2} C:{X:0>2} D:{X:0>2} E:{X:0>2} H:{X:0>2} L:{X:0>2} SP:{X:0>4} PC:{X:0>4} PCMEM:{X:0>2},{X:0>2},{X:0>2},{X:0>2} ", .{
             self.read(u8, Register8.a),
             self.registers[6],
             self.read(u8, Register8.b),
@@ -260,9 +260,9 @@ pub const CPU = struct {
 
     // step the CPU forward by one instruction
     pub fn step(self: *CPU) usize {
-        self.doctorLog();
         switch (self.state) {
             .Running => {
+                self.doctorLog();
                 const opcode = self.pc_read(u8);
                 std.log.info("Opcode: 0x{X}", .{opcode});
                 const instr = self.decode(opcode);
