@@ -1,5 +1,6 @@
 const std = @import("std");
 const opcodes = @import("opcodes.zig");
+const Address = opcodes.Address;
 const Load = opcodes.Load;
 const LoadOperand = opcodes.LoadOperand;
 const StackOp = opcodes.StackOperation;
@@ -11,6 +12,7 @@ const ByteArithmetic = opcodes.ByteArithmetic;
 const Jump = opcodes.Jump;
 const Call = opcodes.Call;
 const Return = opcodes.Return;
+const InterruptControl = opcodes.InterruptControl;
 const Instruction = opcodes.Instruction;
 
 pub const CPUError = error{
@@ -49,6 +51,7 @@ pub const Register16 = enum(u3) {
     bc,
     af,
     sp,
+    pc,
 
     // af,
     // bc,
@@ -70,11 +73,17 @@ pub const CPU = struct {
     const Flags = packed struct { _dead_bits: u4 = 0, carry: u1 = 0, half_carry: u1 = 0, subtraction: u1 = 0, zero: u1 = 0 };
     const Flag = union(enum) { carry: u1, half_carry: u1, subtraction: u1, zero: u1 };
 
+    // interrupt flags
+    const InterruptFlags = packed struct { _dead_bits: u3 = 0, joypad: u1, serial: u1, timer: u1, lcd: u1, vblank: u1 };
+
     // Assuming DMG startup state  0 1 2 3 4 5 6 7   and   0  1  2  3  4
     // Registers are indexed as    L H E D C B F A        HL DE BC AF SP
-    registers: [8]u8 = [_]u8{0} ** 8,
+    registers: [8]u8 = [_]u8{ 0x4D, 0x01, 0xD8, 0x00, 0x13, 0x00, 0xB0, 0x01 },
     pc: u16 = 0x0100,
     sp: u16 = 0xFFFE,
+
+    // interrupt flag
+    ime: bool = false,
 
     // TODO: Rework Memory
     memory: [0xFFFF]u8 = [_]u8{0} ** 0xFFFF,
@@ -91,11 +100,48 @@ pub const CPU = struct {
     }
 
     pub fn loadROM(self: *CPU, rom: []const u8) void {
-        @memcpy(&self.memory, rom[0..self.memory.len]);
+        const len = @min(self.memory.len, rom.len);
+        @memcpy(self.memory[0..len], rom[0..len]);
     }
 
     pub fn deinit(self: *CPU) void {
         self.table.?.deinit();
+    }
+
+    pub fn logState(self: *CPU) void {
+        std.log.info("State: {s}  Registers: A = 0x{X} [HL] = 0x{X} B = 0x{X} C = 0x{X} D = 0x{X} E = 0x{X} H = 0x{X} L = 0x{X}  PC: 0x{X}  SP: 0x{X}", .{
+            @tagName(self.state),
+            self.read(u8, Register8.a),
+            self.read(u8, Register8.hl),
+            self.read(u8, Register8.b),
+            self.read(u8, Register8.c),
+            self.read(u8, Register8.d),
+            self.read(u8, Register8.e),
+            self.read(u8, Register8.h),
+            self.read(u8, Register8.l),
+            self.pc,
+            self.sp,
+        });
+    }
+
+    pub fn doctorLog(self: *CPU) void {
+        std.log.info("A: {X} F: {X} B: {X} C: {X} D: {X} E: {X} H: {X} L: {X} SP: {X} PC: {X} PCMEM:{X},{X},{X},{X} ", .{
+            self.read(u8, Register8.a),
+            self.registers[6],
+            self.read(u8, Register8.b),
+            self.read(u8, Register8.c),
+            self.read(u8, Register8.d),
+            self.read(u8, Register8.e),
+            self.read(u8, Register8.h),
+            self.read(u8, Register8.l),
+            self.sp,
+            self.pc,
+            // check for overflow
+            if (self.pc >= self.memory.len) 0xAA else self.read(u8, self.pc),
+            if (self.memory.len - self.pc < 1) 0xAA else self.read(u8, self.pc + 1),
+            if (self.memory.len - self.pc < 2) 0xAA else self.read(u8, self.pc + 2),
+            if (self.memory.len - self.pc < 3) 0xAA else self.read(u8, self.pc + 3),
+        });
     }
 
     /// Set the CPU Flag register to the passed value
@@ -113,23 +159,67 @@ pub const CPU = struct {
         return @ptrCast(&self.registers[6]);
     }
 
-    // Accessors
-    // read a word/byte from memory
-    pub fn mem_read(self: *CPU, comptime T: type, addr: u16) *T {
-        return switch (T) {
-            u8 => &self.memory[addr],
-            u16 => @ptrCast(@alignCast(&self.memory[addr])),
-            else => @compileError("Unsupported type for read"),
+    /// Goal of this function is to take any readable value as a source (r8, r16, address, etc)
+    /// And sucessfully return the value at that destination.
+    pub fn read(self: *CPU, comptime T: type, from: anytype) T {
+        return switch (@TypeOf(from)) {
+            // turn address into raw memory address
+            Address => self.read(T, self.address_ptr(from)),
+            u16 => if (from == 0xFF44) 0x90 else std.mem.readInt(T, @ptrCast(&self.memory[from]), .little),
+            Register8 => blk: {
+                if (T != u8) @compileError("Cannot read non-byte value from byte register");
+                break :blk switch (from) {
+                    .hl => self.read(u8, self.read(u16, Register16.hl)),
+                    else => self.registers[@intFromEnum(from)],
+                };
+            },
+            Register16 => blk: {
+                if (T != u16) @compileError("Cannot read non-word value from 16 bit register");
+                break :blk switch (from) {
+                    .sp => self.sp,
+                    .pc => self.pc,
+                    else => std.mem.readInt(u16, @ptrCast(&self.registers[@intFromEnum(from) * 2]), .little),
+                };
+            },
+            else => @compileError("Invalid type, not readable"),
         };
     }
 
-    // Simple load funciton, ultimately any load operation boils down to this
-    // my goal is to have any "load" instruction eventually call this
-    pub fn write(comptime T: type, dest: *T, src: T) void {
-        switch (T) {
-            u8 => dest.* = src,
-            u16 => std.mem.writeInt(u16, @ptrCast(@alignCast(dest)), src, .little),
-            else => @compileError("Invliad type for write"),
+    /// Goal of this function is to take any writable value as a destination (r8, r16, address, etc)
+    /// And sucessfully write the src value to that destination.
+    /// This function assumes that the src value is raw data, and not a representation of any data, (like a Register or Address)
+    pub fn write(self: *CPU, comptime T: type, dest: anytype, src: T) void {
+        switch (@TypeOf(dest)) {
+            // Extract the pointer from the passed address and write to the location in memory
+            Address => self.write(T, self.address_ptr(dest), src),
+            // given a raw memory address, write to it
+            u16 => {
+                std.log.info("Writing 0x{X} to 0x{X}", .{ src, dest });
+                if (dest == 0xFF01) {
+                    std.log.warn("Attempted write to 0xFF01: {any}", .{src});
+                }
+                if (dest == 0xFF02) std.log.warn("Attempted write to 0xFF02: {any}", .{src});
+                std.mem.writeInt(T, @ptrCast(@alignCast(&self.memory[dest])), src, .little);
+            },
+            // write a byte to the register
+            Register8 => {
+                std.log.info("Writing 0x{X} to Register {s}", .{ src, @tagName(dest) });
+                if (T != u8) @compileError("Cannot write non-byte value to byte register");
+                switch (dest) {
+                    .hl => self.write(u8, self.read(u16, Register16.hl), src),
+                    else => self.registers[@intFromEnum(dest)] = src,
+                }
+            },
+            Register16 => {
+                std.log.info("Writing 0x{X} to Register {s}", .{ src, @tagName(dest) });
+                if (T != u16) @compileError("Cannot write non-word value to 16 bit register");
+                switch (dest) {
+                    .sp => self.sp = src,
+                    .pc => self.pc = src,
+                    else => std.mem.writeInt(u16, @ptrCast(&self.registers[@intFromEnum(dest) * 2]), src, .little),
+                }
+            },
+            else => @compileError("Invalid type, not writable"),
         }
     }
 
@@ -140,73 +230,41 @@ pub const CPU = struct {
         return switch (addr) {
             .bc, .de, .hl => ret: {
                 const r16 = Register16.from_str(@tagName(addr)) catch unreachable;
-                break :ret self.get_r16(r16).*;
+                break :ret self.read(u16, r16);
             },
             .hli => ret: {
-                const val = self.get_r16(.hl).*;
-                self.get_r16(.hl).* += 1;
+                const val = self.read(u16, Register16.hl);
+                self.write(u16, Register16.hl, val + 1);
                 break :ret val;
             },
             .hld => ret: {
-                const val = self.get_r16(.hl).*;
-                self.get_r16(.hl).* -= 1;
+                const val = self.read(u16, Register16.hl);
+                self.write(u16, Register16.hl, val - 1);
                 break :ret val;
             },
             .a16 => self.pc_read(u16),
-            .c => 0xFF00 + @as(u16, @intCast(self.get_r8(.c).*)),
+            .c => 0xFF00 + @as(u16, @intCast(self.read(u8, Register8.c))),
             .a8 => 0xFF00 + @as(u16, @intCast(self.pc_read(u8))),
         };
     }
 
-    /// Get a pointer to the value stored in the 8 bit register
-    /// if the variaant is .hl, get a pointer to the value in memory
-    /// pointed to by the HL register
-    pub fn get_r8(self: *CPU, r8: Register8) *u8 {
-        return switch (r8) {
-            // read byte at the address pointed to by HL register
-            .hl => self.mem_read(u8, self.get_r16(.hl).*),
-            // otherwise read register
-            else => &self.registers[@intFromEnum(r8)],
-        };
-    }
-
-    // get a pointer to register r16
-    pub fn get_r16(self: *CPU, r16: Register16) *u16 {
-        switch (r16) {
-            .sp => return &self.sp,
-            else => {
-                const idx: u3 = @intCast(@intFromEnum(r16));
-                return @ptrCast(@alignCast(&self.registers[idx * 2]));
-            },
-        }
-    }
-
-    // TODO: generic register funciton??
-    // pub fn register(self: *CPU, comptime T: type, register: anytype) *T {
-    //     comptime if (!(T == u8 or T == u16)) @compileError("Invalid type -- expecting u8 or u16");
-    //     switch (T) {
-    //         u8 => {
-    //             comptime info = @typeInfo(@TypeOf(register)).Enum.;
-    //         }
-    //     }
-    // }
-
     // read a byte or word from the program counter
     // TODO: test this
     pub fn pc_read(self: *CPU, comptime T: type) T {
-        comptime if (@typeInfo(T) != .Int) @compileError("Invalid type -- expecting integer");
-        comptime if (@typeInfo(T).Int.bits > 16) @compileError("Invalid type -- 8 or 16 bit integer");
-
         defer self.pc += @divExact(@typeInfo(T).Int.bits, 8);
-        // return std.mem.readInt(T, @ptrCast(&self.memory[self.pc]), .little);
-        return self.mem_read(T, self.pc).*;
+        switch (T) {
+            u8, u16 => return self.read(T, self.pc),
+            else => @compileError("Invalid type, can only read u8 or u16 from Program Counter"),
+        }
     }
 
     // step the CPU forward by one instruction
     pub fn step(self: *CPU) usize {
+        self.doctorLog();
         switch (self.state) {
             .Running => {
                 const opcode = self.pc_read(u8);
+                std.log.info("Opcode: 0x{X}", .{opcode});
                 const instr = self.decode(opcode);
                 return self.execute(instr);
             },
@@ -235,6 +293,7 @@ pub const CPU = struct {
             .Jump => |jmp| self.executeJump(jmp),
             .Call => |call_fn| self.executeCall(call_fn),
             .Return => |ret| self.executeReturn(ret),
+            .InterruptControl => |inter| self.executeInterruptControl(inter),
         };
     }
 
@@ -243,49 +302,50 @@ pub const CPU = struct {
     // ########################################
 
     // push a value to the stack
-    pub fn stackPush(self: *CPU, value: u16) void {
+    pub fn stackPush(self: *CPU, r16: Register16) void {
         self.sp -= 2;
-        // push is just a load operation
-        // convince zig that this pointer to a byte is a pointer to a u16
-        CPU.write(u16, @ptrCast(@alignCast(&self.memory[self.sp])), value);
+        // write the value contained in the register to the stack
+        self.write(u16, self.sp, self.read(u16, r16));
     }
 
     // pop a value from the stack
-    pub fn stackPop(self: *CPU, ptr: *u16) void {
+    pub fn stackPop(self: *CPU, r16: Register16) void {
         defer self.sp += 2;
-        // pop is just a load operation
-        CPU.write(u16, ptr, std.mem.readInt(u16, @ptrCast(self.memory[self.sp .. self.sp + 2]), .little));
+        // read value from stack and write it to the register
+        const popped = self.read(u16, self.sp);
+        self.write(u16, r16, popped);
     }
 
     pub fn executeStackOp(self: *CPU, op: StackOp) usize {
         switch (op.op) {
-            .push => |r16| self.stackPush(self.get_r16(r16).*),
-            .pop => |r16| self.stackPop(self.get_r16(r16)),
+            .push => |r16| self.stackPush(r16),
+            .pop => |r16| self.stackPop(r16),
         }
         return op.cycles;
     }
 
     pub fn executeLoad(self: *CPU, op: Load) usize {
+        op.log();
         switch (op.src) {
             // 8 bit load
             .r8, .imm8, .address => {
                 const src = self.fetchLoadData(u8, op.src);
-                const dest = switch (op.dest) {
-                    .r8 => |r8| self.get_r8(r8),
-                    .address => |addr| self.mem_read(u8, self.address_ptr(addr)),
+                switch (op.dest) {
+                    .r8 => |r8| self.write(u8, r8, src),
+                    .address => |addr| self.write(u8, addr, src),
                     else => unreachable,
-                };
-                CPU.write(u8, dest, src);
+                }
+                // CPU.write(u8, dest, src);
             },
             // 16 bit load
             .r16, .imm16, .sp_offset => {
                 const src = self.fetchLoadData(u16, op.src);
-                const dest = switch (op.dest) {
-                    .r16 => |r16| self.get_r16(r16),
-                    .address => |addr| self.mem_read(u16, self.address_ptr(addr)),
+                switch (op.dest) {
+                    .r16 => |r16| self.write(u16, r16, src),
+                    .address => |address| self.write(u16, address, src),
                     else => unreachable,
-                };
-                CPU.write(u16, dest, src);
+                }
+                // CPU.old_write(u16, dest, src);
             },
         }
 
@@ -297,14 +357,14 @@ pub const CPU = struct {
         comptime if (!(T == u8 or T == u16)) @compileError("Invalid Type -- expected u8 or u16");
         return switch (T) {
             u8 => switch (operand) {
-                .r8 => |r8| self.get_r8(r8).*,
+                .r8 => |r8| self.read(u8, r8),
                 // TODO: find a way to better express the posibilty of an addr pointing to a u16
-                .address => |addr| self.mem_read(u8, self.address_ptr(addr)).*,
+                .address => |addr| self.read(u8, addr),
                 .imm8 => self.pc_read(u8),
                 else => unreachable,
             },
             u16 => switch (operand) {
-                .r16 => |r16| self.get_r16(r16).*,
+                .r16 => |r16| self.read(u16, r16),
                 .imm16 => self.pc_read(u16),
                 .sp_offset => blk: {
                     self.add_sp_e8();
@@ -317,12 +377,13 @@ pub const CPU = struct {
     }
 
     pub fn executeAdd(self: *CPU, add_instr: Add) usize {
+        // TODO: I think this can be done better....
         const rhs = switch (add_instr.src) {
             // 8 bit add
-            .r8 => |r8| self.get_r8(r8).*,
+            .r8 => |r8| self.read(u8, r8),
             .imm8 => self.pc_read(u8),
             .r16 => |r16| {
-                self.genericAdd(u16, self.get_r16(.hl), self.get_r16(r16).*);
+                self.genericAdd(u16, Register16.hl, self.read(u16, r16));
                 return add_instr.cycles;
             },
             .e8 => { // go ahead and execute special function
@@ -332,7 +393,7 @@ pub const CPU = struct {
         };
 
         // if we are here then its an 8 bit load
-        if (add_instr.with_carry) self.adc(rhs) else self.genericAdd(u8, self.get_r8(.a), rhs);
+        if (add_instr.with_carry) self.adc(rhs) else self.genericAdd(u8, Register8.a, rhs);
         return add_instr.cycles;
     }
 
@@ -346,14 +407,19 @@ pub const CPU = struct {
             .XOR,
             .CP,
             => |operand| switch (operand) {
-                .r8 => |r8| self.get_r8(r8).*,
+                .r8 => |r8| self.read(u8, r8),
                 .imm8 => self.pc_read(u8),
             },
             else => undefined,
         };
 
         self.flag_state().* = switch (instr.operation) {
-            .SUB => CPU.sub(self.get_r8(.a), rhs),
+            .SUB => blk: {
+                const acc = self.read(u8, Register8.a);
+                const result = CPU.sub(acc, rhs);
+                self.write(u8, Register8.a, result.@"0");
+                break :blk result.@"1";
+            },
             .SBC => self.sbc(rhs),
             .AND => self.acc_and(rhs),
             .OR => self.acc_or(rhs),
@@ -362,9 +428,8 @@ pub const CPU = struct {
                 //Subtracts from the 8-bit A register, the 8-bit register r, and updates flags based on the result.
                 // This instruction is basically identical to SUB r, but does not update the A register.
                 // store and write back the oringal A register value
-                const a = self.get_r8(.a).*;
-                defer self.get_r8(.a).* = a;
-                break :blk CPU.sub(self.get_r8(.a), rhs);
+                const acc = self.read(u8, Register8.a);
+                break :blk CPU.sub(acc, rhs).@"1";
             },
 
             // toggles carry, sets HC, and N to 0, doesnt touch Z
@@ -375,7 +440,7 @@ pub const CPU = struct {
                 break :blk self.flag_state().*;
             },
             .CPL => blk: {
-                self.get_r8(.a).* = ~self.get_r8(.a).*;
+                self.write(u8, Register8.a, ~self.read(u8, Register8.a));
                 self.set_flag(.{ .subtraction = 1 });
                 self.set_flag(.{ .half_carry = 1 });
                 break :blk self.flag_state().*;
@@ -387,8 +452,8 @@ pub const CPU = struct {
 
     fn executeInc(self: *CPU, inc_instr: Increment) usize {
         switch (inc_instr.dest) {
-            .r8 => |r8| self.inc(u8, self.get_r8(r8)),
-            .r16 => |r16| self.inc(u16, self.get_r16(r16)),
+            .r8 => |r8| self.inc(u8, r8),
+            .r16 => |r16| self.inc(u16, r16),
         }
 
         return inc_instr.cycles;
@@ -396,15 +461,15 @@ pub const CPU = struct {
 
     fn executeDec(self: *CPU, dec_instr: Decrement) usize {
         switch (dec_instr.dest) {
-            .r8 => |r8| self.dec(u8, self.get_r8(r8)),
-            .r16 => |r16| self.dec(u16, self.get_r16(r16)),
+            .r8 => |r8| self.dec(u8, r8),
+            .r16 => |r16| self.dec(u16, r16),
         }
 
         return dec_instr.cycles;
     }
 
     fn jump(self: *CPU, addr: u16) void {
-        self.pc = addr;
+        std.mem.writeInt(u16, @ptrCast(&self.pc), addr, .little);
     }
 
     fn check_condition(cc: Jump.Condition, flags: Flags) bool {
@@ -419,13 +484,14 @@ pub const CPU = struct {
 
     fn executeJump(self: *CPU, jmp: Jump) usize {
         const result: struct { addr: u16, cc: Jump.Condition } = switch (jmp.operand) {
-            .hl => |cc| .{ .addr = self.get_r16(.hl).*, .cc = cc },
+            .hl => |cc| .{ .addr = self.read(u8, Register8.hl), .cc = cc },
             .a16 => |cc| .{ .addr = self.pc_read(u16), .cc = cc },
             .e8 => |cc| .{ .addr = @as(u16, self.pc_read(u8)) + self.pc, .cc = cc },
         };
 
         // if the condition is met, then flow through the switch statement,
         // otherwise return the relevant cycle count
+        std.log.debug("JUMP {s} 0x{X}", .{ @tagName(result.cc), result.addr });
         if (CPU.check_condition(result.cc, self.flag_state().*)) {
             self.jump(result.addr);
             return jmp.cycles[0];
@@ -433,11 +499,12 @@ pub const CPU = struct {
     }
 
     fn call(self: *CPU, addr: u16) void {
-        self.stackPush(self.pc);
+        self.stackPush(Register16.pc);
         self.jump(addr);
     }
 
     fn executeCall(self: *CPU, fn_call: Call) usize {
+        std.log.info("CALL", .{});
         const addr = self.pc_read(u16);
 
         // if the condition is met, then flow through the switch statement,
@@ -449,20 +516,41 @@ pub const CPU = struct {
     }
 
     fn executeReturn(self: *CPU, fn_ret: Return) usize {
+        std.log.info("RETURN", .{});
         // if the condition is met, then flow through the switch statement,
         // otherwise return the relevant cycle count
         if (CPU.check_condition(fn_ret.condition, self.flag_state().*)) {
-            self.stackPop(&self.pc);
+            self.stackPop(Register16.pc);
             return fn_ret.cycles[0];
         } else return fn_ret.cycles[1];
     }
 
+    fn executeInterruptControl(self: *CPU, intr: InterruptControl) usize {
+        //TODO: "The effect of ei is delayed by one instruction.
+        // This means that ei followed immediately by di does not allow any interrupts between them"
+        return switch (intr) {
+            .ei => |data| blk: {
+                self.ime = true;
+                break :blk data.cycles;
+            },
+            .reti => |reti| blk: {
+                self.ime = true;
+                break :blk self.executeReturn(reti);
+            },
+            .di => |di| blk: {
+                self.ime = false;
+                break :blk di.cycles;
+            },
+        };
+    }
+
     fn acc_and(self: *CPU, rhs: u8) Flags {
-        const acc = self.get_r8(.a);
-        acc.* &= rhs;
+        var acc = self.read(u8, Register8.a);
+        acc &= rhs;
+        self.write(u8, Register8.a, acc);
 
         return Flags{
-            .zero = if (acc.* == 0) 1 else 0,
+            .zero = if (acc == 0) 1 else 0,
             .half_carry = 1,
             .carry = 0,
             .subtraction = 0,
@@ -470,41 +558,52 @@ pub const CPU = struct {
     }
 
     fn acc_or(self: *CPU, rhs: u8) Flags {
-        const acc = self.get_r8(.a);
-        acc.* |= rhs;
+        var acc = self.read(u8, Register8.a);
+        acc |= rhs;
+        self.write(u8, Register8.a, acc);
 
         return Flags{
-            .zero = if (acc.* == 0) 1 else 0,
+            .zero = if (acc == 0) 1 else 0,
         };
     }
 
     fn acc_xor(self: *CPU, rhs: u8) Flags {
-        const acc = self.get_r8(.a);
-        acc.* ^= rhs;
+        var acc = self.read(u8, Register8.a);
+        acc ^= rhs;
+        self.write(u8, Register8.a, acc);
 
         return Flags{
-            .zero = if (acc.* == 0) 1 else 0,
+            .zero = if (acc == 0) 1 else 0,
         };
     }
 
     /// For most operations, the Zero, Carry, and Half carry flags are set, and
     /// this function automatically does that, for more control over flag state call
     /// the regular CPU.add() function
-    pub fn genericAdd(self: *CPU, comptime T: type, dest: *T, src: anytype) void {
-        if (T == u8) self.flag_state().* = CPU.add(T, dest, src) else if (T == u16) {
-            // 16 bit add functions leave zero flag untouched, so the state is saved and rewritten
-            const zero = self.flag_state().zero;
-            self.flag_state().* = CPU.add(T, dest, src);
-            self.set_flag(.{ .zero = zero });
+    /// T is the type we're operating on & dest/src are readable/writeable types
+    pub fn genericAdd(self: *CPU, comptime T: type, dest: anytype, src: T) void {
+        const lhs = self.read(T, dest);
+        switch (T) {
+            u8 => {
+                const result = CPU.add(T, lhs, src);
+                self.write(T, dest, result.@"0");
+                self.flag_state().* = result.@"1";
+            },
+            u16 => {
+                const zero = self.flag_state().zero;
+                const result = CPU.add(T, lhs, src);
+                self.write(T, dest, result.@"0");
+                self.flag_state().* = result.@"1";
+                self.set_flag(.{ .zero = zero });
+            },
+            else => @compileError("Invalid type for arithmetic"),
         }
     }
 
     /// Adds the sum of dest and rhs to the memory location pointed to by dest
     /// return the Zero, Carry, Half-Carry, and Substraction flags, and it is up
     /// to the caller to ensure that the proper flags based on the return value
-    pub fn add(comptime T: type, dest: *T, rhs: T) Flags {
-        const lhs = dest.*;
-
+    pub fn add(comptime T: type, lhs: T, rhs: T) struct { T, Flags } {
         const int_type = @Type(.{ .Int = .{ .signedness = .unsigned, .bits = @typeInfo(T).Int.bits - 4 } });
 
         const lhs_lower: int_type = @truncate(lhs);
@@ -513,16 +612,17 @@ pub const CPU = struct {
         const half_carry = @addWithOverflow(lhs_lower, rhs_lower).@"1";
 
         const result = @addWithOverflow(lhs, rhs);
-        dest.* = result.@"0";
         const zero: u1 = if (result.@"0" == 0) 1 else 0;
-        return Flags{ .carry = result.@"1", .zero = zero, .half_carry = half_carry, .subtraction = 0 };
+        const flags = Flags{ .carry = result.@"1", .zero = zero, .half_carry = half_carry, .subtraction = 0 };
+        return .{ result.@"0", flags };
     }
 
     /// Function to handle specific instructions where immediate data is added to SP
     pub fn add_sp_e8(self: *CPU) void {
-        var lsb: u8 = @truncate(self.sp >> 8);
+        const lsb: u8 = @truncate(self.sp >> 8);
         const e8 = self.pc_read(u8);
-        const flags = CPU.add(u8, &lsb, e8);
+        const flags = CPU.add(u8, lsb, e8).@"1";
+
         self.set_flag(.{ .carry = flags.carry });
         self.set_flag(.{ .half_carry = flags.half_carry });
         self.sp += e8;
@@ -530,36 +630,45 @@ pub const CPU = struct {
 
     /// Add to the A register, the carry flag, and the associated data
     pub fn adc(self: *CPU, rhs: u8) void {
-        const partial = CPU.add(u8, self.get_r8(.a), rhs);
-        const partial2 = CPU.add(u8, self.get_r8(.a), @as(u8, self.flag_state().carry));
-        self.flag_state().* = CPU.join_flags(partial, partial2);
+        const acc = self.read(u8, Register8.a);
+
+        const partial = CPU.add(u8, acc, rhs);
+        const partial2 = CPU.add(u8, partial.@"0", @as(u8, self.flag_state().carry));
+
+        self.write(u8, Register8.a, partial2.@"0");
+        self.flag_state().* = CPU.join_flags(partial.@"1", partial2.@"1");
     }
 
     /// Adds the sum of dest and rhs to the memory location pointed to by dest
     /// return the Zero, Carry, Half-Carry, and Substraction flags, and it is up
     /// to the caller to ensure that the proper flags based on the return value
-    pub fn sub(dest: *u8, rhs: u8) Flags {
+    pub fn sub(lhs: u8, rhs: u8) struct { u8, Flags } {
         const B3 = 0b00001000;
         const B7 = 0b10000000;
 
-        const init_b3: u1 = @truncate((dest.* & B3) >> 3);
-        const init_b7: u1 = @truncate((dest.* & B7) >> 7);
+        const init_b3: u1 = @truncate((lhs & B3) >> 3);
+        const init_b7: u1 = @truncate((lhs & B7) >> 7);
 
-        dest.* -%= rhs;
+        const value = lhs -% rhs;
 
-        const new_b3: u1 = @truncate((dest.* & B3) >> 3);
-        const new_b7: u1 = @truncate((dest.* & B7) >> 7);
+        const new_b3: u1 = @truncate((value & B3) >> 3);
+        const new_b7: u1 = @truncate((value & B7) >> 7);
 
-        const zero: u1 = if (dest.* == 0) 1 else 0;
+        const zero: u1 = if (value == 0) 1 else 0;
         // XOR relevant bits to see if they changed,
-        return Flags{ .carry = init_b7 ^ new_b7, .zero = zero, .half_carry = init_b3 ^ new_b3, .subtraction = 1 };
+        const flags = Flags{ .carry = init_b7 ^ new_b7, .zero = zero, .half_carry = init_b3 ^ new_b3, .subtraction = 1 };
+        return .{ value, flags };
     }
 
     /// Add to the A register, the carry flag, and the associated data
     pub fn sbc(self: *CPU, rhs: u8) Flags {
-        const partial = CPU.sub(self.get_r8(.a), rhs);
-        const partial2 = CPU.sub(self.get_r8(.a), @as(u8, self.flag_state().carry));
-        return CPU.join_flags(partial, partial2);
+        const acc = self.read(u8, Register8.a);
+
+        const partial = CPU.sub(acc, rhs);
+        const partial2 = CPU.sub(partial.@"0", @as(u8, self.flag_state().carry));
+
+        self.write(u8, Register8.a, partial2.@"0");
+        return CPU.join_flags(partial.@"1", partial2.@"1");
     }
 
     /// returns the OR of the two flags
@@ -572,22 +681,31 @@ pub const CPU = struct {
         };
     }
 
-    pub fn inc(self: *CPU, comptime T: type, dest: *T) void {
-        const new_flag_state = CPU.add(T, dest, 1);
+    pub fn inc(self: *CPU, comptime T: type, dest: anytype) void {
+        const value = self.read(T, dest);
+        const result = CPU.add(T, value, 1);
+        self.write(T, dest, result.@"0");
         if (T == u8) {
-            self.set_flag(.{ .half_carry = new_flag_state.half_carry });
-            self.set_flag(.{ .zero = new_flag_state.zero });
+            self.set_flag(.{ .half_carry = result.@"1".half_carry });
+            self.set_flag(.{ .zero = result.@"1".zero });
             self.set_flag(.{ .subtraction = 0 });
         }
     }
 
-    pub fn dec(self: *CPU, comptime T: type, dest: *T) void {
-        if (T == u16) dest.* -%= 1 else {
-            const new_flag_state = CPU.sub(dest, 1);
-            self.set_flag(.{ .half_carry = new_flag_state.half_carry });
-            self.set_flag(.{ .zero = new_flag_state.zero });
-            self.set_flag(.{ .subtraction = 1 });
+    pub fn dec(self: *CPU, comptime T: type, dest: anytype) void {
+        var value = self.read(T, dest);
+        switch (T) {
+            u16 => value -%= 1,
+            u8 => {
+                const result = CPU.sub(value, 1);
+                value = result.@"0";
+                self.set_flag(.{ .half_carry = result.@"1".half_carry });
+                self.set_flag(.{ .zero = result.@"1".zero });
+                self.set_flag(.{ .subtraction = 1 });
+            },
+            else => @compileError("Invalid arithmetic type, expected u8 or u16"),
         }
+        self.write(T, dest, value);
     }
 
     // ########################################
@@ -597,14 +715,17 @@ pub const CPU = struct {
     /// Right now, we just check to see if we should buffer some byte
     /// to stdout based on the SB, and SC registers
     pub fn serialTransfer(self: *CPU, writer: anytype) void {
-        const SB = 0xFF01;
-        const SC = 0xFF01;
+        // std.log.debug("Serial Transfer Happening!", .{});
+        const SB: u16 = 0xFF01;
+        const SC: u16 = 0xFF02;
 
-        const serial_control = self.mem_read(u8, SC);
-        if (serial_control.* == 0x81) {
+        const serial_control = self.read(u8, SC);
+        // std.log.debug("Value of SC = {X}", .{serial_control});
+        if (serial_control == 0x81) {
             // transfer requested
-            _ = writer.write(&.{self.mem_read(u8, SB).*}) catch unreachable;
-            serial_control.* = 0x01;
+            // std.log.debug("Serial Transfer Requested", .{});
+            _ = writer.write(&.{self.read(u8, SB)}) catch unreachable;
+            self.write(u8, SC, 0x7F);
         }
     }
 };
@@ -629,61 +750,6 @@ test "register16_intFromEnum" {
     try testing.expectEqual(3, @intFromEnum(Register16.af));
 }
 
-test "get_register8" {
-    var cpu = CPU{};
-
-    cpu.registers[@intFromEnum(Register8.a)] = 0x0A;
-    cpu.registers[@intFromEnum(Register8.a) - 1] = 0x0F;
-    cpu.registers[@intFromEnum(Register8.b)] = 0x0B;
-    cpu.registers[@intFromEnum(Register8.c)] = 0x0C;
-    cpu.registers[@intFromEnum(Register8.d)] = 0x0D;
-    cpu.registers[@intFromEnum(Register8.e)] = 0x0E;
-    cpu.registers[@intFromEnum(Register8.h)] = 0x06;
-    cpu.registers[@intFromEnum(Register8.l)] = 0x09;
-
-    try testing.expectEqual(0x0A, cpu.get_r8(.a).*);
-    try testing.expectEqual(0x0B, cpu.get_r8(.b).*);
-    try testing.expectEqual(0x0C, cpu.get_r8(.c).*);
-    try testing.expectEqual(0x0D, cpu.get_r8(.d).*);
-    try testing.expectEqual(0x0E, cpu.get_r8(.e).*);
-    try testing.expectEqual(0x06, cpu.get_r8(.h).*);
-    try testing.expectEqual(0x09, cpu.get_r8(.l).*);
-}
-
-test "get_register16" {
-    var cpu = CPU{};
-
-    cpu.registers[@intFromEnum(Register8.a)] = 0x0A;
-    cpu.registers[@intFromEnum(Register8.a) - 1] = 0x0F;
-    cpu.registers[@intFromEnum(Register8.b)] = 0x0B;
-    cpu.registers[@intFromEnum(Register8.c)] = 0x0C;
-    cpu.registers[@intFromEnum(Register8.d)] = 0x0D;
-    cpu.registers[@intFromEnum(Register8.e)] = 0x0E;
-    cpu.registers[@intFromEnum(Register8.h)] = 0x06;
-    cpu.registers[@intFromEnum(Register8.l)] = 0x09;
-
-    try testing.expectEqual(0x0A0F, cpu.get_r16(.af).*);
-    try testing.expectEqual(0x0B0C, cpu.get_r16(.bc).*);
-    try testing.expectEqual(0x0D0E, cpu.get_r16(.de).*);
-    try testing.expectEqual(0x0609, cpu.get_r16(.hl).*);
-}
-
-test "memory" {
-    var cpu = CPU{};
-
-    // Little endian says LSB is in the lowest addr
-    cpu.memory[0x200] = 0xEF;
-    cpu.memory[0x201] = 0xBE;
-
-    cpu.memory[0x202] = 0x69;
-
-    const word = cpu.mem_read(u16, 0x200);
-    const byte = cpu.mem_read(u8, 0x202);
-
-    try testing.expectEqual(0xBEEF, word.*);
-    try testing.expectEqual(0x69, byte.*);
-}
-
 test "parse register8" {
     const r8 = try Register8.from_str("a");
     try testing.expectEqual(r8, Register8.a);
@@ -704,7 +770,7 @@ test "basic load8" {
 
     const cycles = cpu.executeLoad(load_a_imm8);
 
-    try testing.expectEqual(cpu.get_r8(.a).*, 0x42);
+    try testing.expectEqual(cpu.read(u8, Register8.a), 0x42);
     try testing.expectEqual(cycles, 2);
     // only + 1 since the opcode is included in the instruction byte count
     try testing.expectEqual(old_pc + 1, cpu.pc);
@@ -719,56 +785,6 @@ test "flag register" {
 }
 
 // Add these tests to the end of cpu.zig
-
-test "ADD instruction - 8-bit register" {
-    var cpu = CPU{};
-    cpu.registers[7] = 0x05; // Set register A to 5
-    cpu.registers[5] = 0x03; // Set register B to 3
-
-    const add = Add{
-        .src = .{ .r8 = .b },
-        .dest = .{ .r8 = .a },
-        .with_carry = false,
-        .cycles = 4,
-        .bytes = 1,
-    };
-
-    const cycles = cpu.executeAdd(add);
-
-    try testing.expectEqual(@as(u8, 0x08), cpu.get_r8(.a).*);
-    try testing.expectEqual(@as(usize, 4), cycles);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().carry);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().half_carry);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
-}
-
-test "ADD instruction - 16-bit register" {
-    var cpu = CPU{};
-    // cpu.registers[1] = 0x34; // Set HL to 0x1234
-    // cpu.registers[0] = 0x12;
-    // cpu.registers[3] = 0x78; // Set DE to 0x5678
-    // cpu.registers[2] = 0x56;
-    cpu.get_r16(.hl).* = 0x1234;
-    cpu.get_r16(.de).* = 0x5678;
-
-    const add = Add{
-        .src = .{ .r16 = .de },
-        .dest = .{ .r16 = .hl },
-        .with_carry = false,
-        .cycles = 8,
-        .bytes = 1,
-    };
-
-    const cycles = cpu.executeAdd(add);
-
-    try testing.expectEqual(@as(u16, 0x68AC), cpu.get_r16(.hl).*);
-    try testing.expectEqual(@as(usize, 8), cycles);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().carry);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().half_carry);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
-}
 
 test "ADC instruction" {
     var cpu = CPU{};
@@ -786,7 +802,7 @@ test "ADC instruction" {
 
     const cycles = cpu.executeAdd(add);
 
-    try testing.expectEqual(@as(u8, 0x09), cpu.get_r8(.a).*);
+    try testing.expectEqual(@as(u8, 0x09), cpu.read(u8, Register8.a));
     try testing.expectEqual(@as(usize, 4), cycles);
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().carry);
@@ -804,9 +820,9 @@ test "INC instruction - 8-bit register" {
         .cycles = 4,
     };
 
-    cpu.inc(u8, cpu.get_r8(inc.dest.r8));
+    cpu.inc(u8, inc.dest.r8);
 
-    try testing.expectEqual(@as(u8, 0x00), cpu.get_r8(.b).*);
+    try testing.expectEqual(@as(u8, 0x00), cpu.read(u8, inc.dest.r8));
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().zero);
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().half_carry);
@@ -825,9 +841,9 @@ test "INC instruction - 16-bit register" {
         .cycles = 8,
     };
 
-    cpu.inc(u16, cpu.get_r16(inc.dest.r16));
+    cpu.inc(u16, inc.dest.r16);
 
-    try testing.expectEqual(@as(u16, 0x0000), cpu.get_r16(.hl).*);
+    try testing.expectEqual(@as(u16, 0x0000), cpu.read(u16, inc.dest.r16));
     // Flags should not be affected by 16-bit INC
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
@@ -837,7 +853,7 @@ test "INC instruction - 16-bit register" {
 
 test "DEC instruction - 8-bit register" {
     var cpu = CPU{};
-    cpu.registers[5] = 0x01; // Set register B to 1
+    cpu.write(u8, Register8.b, 0x01); // Set register B to 1
 
     const dec = Decrement{
         .dest = .{ .r8 = .b },
@@ -845,9 +861,9 @@ test "DEC instruction - 8-bit register" {
         .cycles = 4,
     };
 
-    cpu.dec(u8, cpu.get_r8(dec.dest.r8));
+    cpu.dec(u8, dec.dest.r8);
 
-    try testing.expectEqual(@as(u8, 0x00), cpu.get_r8(.b).*);
+    try testing.expectEqual(@as(u8, 0x00), cpu.read(u8, dec.dest.r8));
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().zero);
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().subtraction);
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().half_carry);
@@ -866,9 +882,9 @@ test "DEC instruction - 16-bit register" {
         .cycles = 8,
     };
 
-    cpu.dec(u16, cpu.get_r16(dec.dest.r16));
+    cpu.dec(u16, dec.dest.r16);
 
-    try testing.expectEqual(@as(u16, 0xFFFF), cpu.get_r16(.hl).*);
+    try testing.expectEqual(@as(u16, 0xFFFF), cpu.read(u16, dec.dest.r16));
     // Flags should not be affected by 16-bit DEC
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
@@ -886,7 +902,7 @@ test "NOP instruction" {
     defer cpu.deinit();
 
     const initial_pc = cpu.pc;
-    cpu.mem_read(u8, cpu.pc).* = 0x00;
+    cpu.write(u8, cpu.pc, 0x00);
     const cycles = cpu.step();
 
     try testing.expectEqual(@as(usize, 4), cycles);
@@ -909,7 +925,7 @@ test "LD r8, n8 instruction" {
     const cycles = cpu.execute(ld_b_n8);
 
     try testing.expectEqual(@as(usize, 8), cycles);
-    try testing.expectEqual(@as(u8, 0x42), cpu.get_r8(.b).*);
+    try testing.expectEqual(@as(u8, 0x42), cpu.read(u8, ld_b_n8.Load.dest.r8));
     try testing.expectEqual(init_pc + 1, cpu.pc);
 }
 
@@ -930,43 +946,16 @@ test "LD r16, n16 instruction" {
     const cycles = cpu.execute(ld_hl_n16);
 
     try testing.expectEqual(@as(usize, 12), cycles);
-    try testing.expectEqual(@as(u16, 0x1234), cpu.get_r16(.hl).*);
+    try testing.expectEqual(@as(u16, 0x1234), cpu.read(u16, ld_hl_n16.Load.dest.r16));
     try testing.expectEqual(init_pc + 2, cpu.pc);
-}
-
-test "PUSH and POP instructions" {
-    var cpu = try setupCPU();
-    defer cpu.deinit();
-
-    cpu.get_r16(.bc).* = 0x1234;
-    const initial_sp = cpu.sp;
-
-    const push_bc = Instruction{ .StackOp = .{
-        .op = .{ .push = .bc },
-        .cycles = 16,
-    } };
-    _ = cpu.execute(push_bc);
-
-    try testing.expectEqual(initial_sp - 2, cpu.sp);
-    try testing.expectEqual(@as(u16, 0x1234), cpu.mem_read(u16, cpu.sp).*);
-
-    cpu.get_r16(.bc).* = 0;
-    const pop_bc = Instruction{ .StackOp = .{
-        .op = .{ .pop = .bc },
-        .cycles = 12,
-    } };
-    _ = cpu.execute(pop_bc);
-
-    try testing.expectEqual(initial_sp, cpu.sp);
-    try testing.expectEqual(@as(u16, 0x1234), cpu.get_r16(.bc).*);
 }
 
 test "ADD HL, r16 instruction" {
     var cpu = try setupCPU();
     defer cpu.deinit();
 
-    cpu.get_r16(.hl).* = 0x1000;
-    cpu.get_r16(.de).* = 0x0234;
+    cpu.write(u16, Register16.hl, 0x1000);
+    cpu.write(u16, Register16.de, 0x0234);
 
     const add_hl_de = Instruction{ .Add = .{
         .src = .{ .r16 = .de },
@@ -978,77 +967,9 @@ test "ADD HL, r16 instruction" {
     const cycles = cpu.execute(add_hl_de);
 
     try testing.expectEqual(@as(usize, 8), cycles);
-    try testing.expectEqual(@as(u16, 0x1234), cpu.get_r16(.hl).*);
+    try testing.expectEqual(@as(u16, 0x1234), cpu.read(u16, add_hl_de.Add.dest.r16));
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
-}
-
-test "INC and DEC r8 instructions" {
-    var cpu = try setupCPU();
-    defer cpu.deinit();
-
-    cpu.get_r8(.a).* = 0xFF;
-    const inc_a = Instruction{ .Inc = .{
-        .dest = .{ .r8 = .a },
-        .bytes = 1,
-        .cycles = 4,
-    } };
-    _ = cpu.execute(inc_a);
-
-    try testing.expectEqual(@as(u8, 0x00), cpu.get_r8(.a).*);
-    try testing.expectEqual(@as(u1, 1), cpu.flag_state().zero);
-    try testing.expectEqual(@as(u1, 1), cpu.flag_state().half_carry);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
-
-    cpu.get_r8(.b).* = 0x01;
-    const dec_b = Instruction{ .Dec = .{
-        .dest = .{ .r8 = .b },
-        .bytes = 1,
-        .cycles = 4,
-    } };
-    _ = cpu.execute(dec_b);
-
-    try testing.expectEqual(@as(u8, 0x00), cpu.get_r8(.b).*);
-    try testing.expectEqual(@as(u1, 1), cpu.flag_state().zero);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().half_carry);
-    try testing.expectEqual(@as(u1, 1), cpu.flag_state().subtraction);
-}
-
-test "ALU operations" {
-    var cpu = try setupCPU();
-    defer cpu.deinit();
-
-    // Test AND operation
-    cpu.get_r8(.a).* = 0b10101010;
-    cpu.get_r8(.b).* = 0b11110000;
-    const and_a_b = Instruction{ .ALUOp = .{
-        .operation = .{ .AND = .{ .r8 = .b } },
-        .bytes = 1,
-        .cycles = 4,
-    } };
-    _ = cpu.execute(and_a_b);
-
-    try testing.expectEqual(@as(u8, 0b10100000), cpu.get_r8(.a).*);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
-    try testing.expectEqual(@as(u1, 1), cpu.flag_state().half_carry);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().carry);
-
-    // Test XOR operation
-    cpu.get_r8(.a).* = 0b10101010;
-    cpu.get_r8(.c).* = 0b11110000;
-    const xor_a_c = Instruction{ .ALUOp = .{
-        .operation = .{ .XOR = .{ .r8 = .c } },
-        .bytes = 1,
-        .cycles = 4,
-    } };
-    _ = cpu.execute(xor_a_c);
-
-    try testing.expectEqual(@as(u8, 0b01011010), cpu.get_r8(.a).*);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().half_carry);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
-    try testing.expectEqual(@as(u1, 0), cpu.flag_state().carry);
 }
 
 test "Jump instructions" {
@@ -1092,37 +1013,141 @@ test "Jump instructions" {
     try testing.expectEqual(initial_pc + 2, cpu.pc);
 }
 
-test "Call and Return instructions" {
+// ########################################################
+
+test "read and write u8 to registers" {
     var cpu = try setupCPU();
     defer cpu.deinit();
 
-    const initial_pc = cpu.pc; // = 0x0100
-    const initial_sp = cpu.sp;
+    cpu.write(u8, Register8.a, 0x12);
+    cpu.write(u8, Register8.b, 0x34);
+    cpu.write(u8, Register8.c, 0x56);
 
-    // Test CALL instruction
-    const call_a16 = Instruction{ .Call = .{
-        .condition = .unconditional,
-        .bytes = 3,
-        .cycles = &[_]usize{24},
-    } };
-    cpu.memory[cpu.pc] = 0x34; // memory[0x0100] = 0x34
-    cpu.memory[cpu.pc + 1] = 0x12; // memory[0x0101] = 0x12
-    _ = cpu.execute(call_a16); // memory[0x0102...] = ...
+    try testing.expectEqual(@as(u8, 0x12), cpu.read(u8, Register8.a));
+    try testing.expectEqual(@as(u8, 0x34), cpu.read(u8, Register8.b));
+    try testing.expectEqual(@as(u8, 0x56), cpu.read(u8, Register8.c));
+}
 
-    try testing.expectEqual(@as(u16, 0x1234), cpu.pc);
-    try testing.expectEqual(initial_sp - 2, cpu.sp);
-    try testing.expectEqual(initial_pc + 2, cpu.mem_read(u16, cpu.sp).*);
+test "read and write u16 to registers" {
+    var cpu = try setupCPU();
+    defer cpu.deinit();
 
-    // Test RET instruction
-    const ret = Instruction{ .Return = .{
-        .condition = .unconditional,
-        .bytes = 1,
-        .cycles = &[_]usize{16},
-    } };
-    _ = cpu.execute(ret);
+    cpu.write(u16, Register16.bc, 0x1234);
+    cpu.write(u16, Register16.de, 0x5678);
+    cpu.write(u16, Register16.hl, 0x9ABC);
 
-    try testing.expectEqual(initial_pc + 2, cpu.pc);
-    try testing.expectEqual(initial_sp, cpu.sp);
+    try testing.expectEqual(@as(u16, 0x1234), cpu.read(u16, Register16.bc));
+    try testing.expectEqual(@as(u16, 0x5678), cpu.read(u16, Register16.de));
+    try testing.expectEqual(@as(u16, 0x9ABC), cpu.read(u16, Register16.hl));
+}
+
+test "read and write to memory" {
+    var cpu = try setupCPU();
+    defer cpu.deinit();
+
+    cpu.write(u8, @as(u16, 0x1000), 0x42);
+    cpu.write(u16, @as(u16, 0x2000), 0xABCD);
+
+    try testing.expectEqual(@as(u8, 0x42), cpu.read(u8, @as(u16, 0x1000)));
+    try testing.expectEqual(@as(u16, 0xABCD), cpu.read(u16, @as(u16, 0x2000)));
+}
+
+test "read and write using Address" {
+    var cpu = try setupCPU();
+    defer cpu.deinit();
+
+    cpu.write(u16, Register16.hl, 0x1234);
+    cpu.write(u8, Address.hl, 0x42);
+
+    try testing.expectEqual(@as(u8, 0x42), cpu.read(u8, Address.hl));
+}
+
+test "stack operations" {
+    var cpu = try setupCPU();
+    defer cpu.deinit();
+
+    cpu.write(u16, Register16.sp, 0xFFFE);
+    cpu.stackPush(Register16.bc);
+
+    try testing.expectEqual(@as(u16, 0xFFFC), cpu.read(u16, Register16.sp));
+
+    cpu.stackPop(Register16.de);
+
+    try testing.expectEqual(@as(u16, 0xFFFE), cpu.read(u16, Register16.sp));
+    try testing.expectEqual(@as(u16, 0x0000), cpu.read(u16, Register16.de));
+}
+
+test "ALU operations" {
+    var cpu = try setupCPU();
+    defer cpu.deinit();
+
+    // Test ADD
+    cpu.write(u8, Register8.a, 0x3C);
+    cpu.write(u8, Register8.b, 0x12);
+    cpu.genericAdd(u8, Register8.a, cpu.read(u8, Register8.b));
+    try testing.expectEqual(@as(u8, 0x4E), cpu.read(u8, Register8.a));
+
+    // Test SUB
+    cpu.write(u8, Register8.a, 0x3C);
+    cpu.write(u8, Register8.c, 0x12);
+    const sub_result = CPU.sub(cpu.read(u8, Register8.a), cpu.read(u8, Register8.c));
+    cpu.write(u8, Register8.a, sub_result.@"0");
+    try testing.expectEqual(@as(u8, 0x2A), cpu.read(u8, Register8.a));
+
+    // Test AND
+    cpu.write(u8, Register8.a, 0b10101010);
+    cpu.write(u8, Register8.d, 0b11110000);
+    _ = cpu.acc_and(cpu.read(u8, Register8.d));
+    try testing.expectEqual(@as(u8, 0b10100000), cpu.read(u8, Register8.a));
+
+    // Test OR
+    cpu.write(u8, Register8.a, 0b10101010);
+    cpu.write(u8, Register8.e, 0b11110000);
+    _ = cpu.acc_or(cpu.read(u8, Register8.e));
+    try testing.expectEqual(@as(u8, 0b11111010), cpu.read(u8, Register8.a));
+
+    // Test XOR
+    cpu.write(u8, Register8.a, 0b10101010);
+    cpu.write(u8, Register8.h, 0b11110000);
+    _ = cpu.acc_xor(cpu.read(u8, Register8.h));
+    try testing.expectEqual(@as(u8, 0b01011010), cpu.read(u8, Register8.a));
+}
+
+test "Increment and Decrement" {
+    var cpu = try setupCPU();
+    defer cpu.deinit();
+
+    // Test INC
+    cpu.write(u8, Register8.a, 0xFF);
+    cpu.inc(u8, Register8.a);
+    try testing.expectEqual(@as(u8, 0x00), cpu.read(u8, Register8.a));
+    try testing.expectEqual(@as(u1, 1), cpu.flag_state().zero);
+    try testing.expectEqual(@as(u1, 1), cpu.flag_state().half_carry);
+
+    // Test DEC
+    cpu.write(u8, Register8.b, 0x01);
+    cpu.dec(u8, Register8.b);
+    try testing.expectEqual(@as(u8, 0x00), cpu.read(u8, Register8.b));
+    try testing.expectEqual(@as(u1, 1), cpu.flag_state().zero);
+    try testing.expectEqual(@as(u1, 1), cpu.flag_state().subtraction);
+}
+
+test "Jump and Call operations" {
+    var cpu = try setupCPU();
+    defer cpu.deinit();
+
+    // Test Jump
+    cpu.write(u16, Register16.pc, 0x1000);
+
+    cpu.jump(0x2000);
+    try testing.expectEqual(@as(u16, 0x2000), cpu.pc);
+
+    // Test Call
+    cpu.write(u16, Register16.sp, 0xFFFE);
+    cpu.call(0x3000);
+    try testing.expectEqual(@as(u16, 0x3000), cpu.pc);
+    try testing.expectEqual(@as(u16, 0xFFFC), cpu.read(u16, Register16.sp));
+    try testing.expectEqual(@as(u16, 0x2000), cpu.read(u16, cpu.read(u16, Register16.sp)));
 }
 
 test "Flags after arithmetic operations" {
@@ -1130,34 +1155,24 @@ test "Flags after arithmetic operations" {
     defer cpu.deinit();
 
     // Test ADD with carry and half-carry
-    cpu.get_r8(.a).* = 0xFF;
-    cpu.get_r8(.b).* = 0x01;
-    const add_a_b = Instruction{ .Add = .{
-        .src = .{ .r8 = .b },
-        .dest = .{ .r8 = .a },
-        .with_carry = false,
-        .cycles = 4,
-        .bytes = 1,
-    } };
-    _ = cpu.execute(add_a_b);
+    cpu.write(u8, Register8.a, 0xFF);
+    cpu.write(u8, Register8.b, 0x01);
+    cpu.genericAdd(u8, Register8.a, cpu.read(u8, Register8.b));
 
-    try testing.expectEqual(@as(u8, 0x00), cpu.get_r8(.a).*);
+    try testing.expectEqual(@as(u8, 0x00), cpu.read(u8, Register8.a));
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().zero);
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().half_carry);
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().carry);
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().subtraction);
 
     // Test SUB with borrow
-    cpu.get_r8(.a).* = 0x00;
-    cpu.get_r8(.c).* = 0x01;
-    const sub_a_c = Instruction{ .ALUOp = .{
-        .operation = .{ .SUB = .{ .r8 = .c } },
-        .bytes = 1,
-        .cycles = 4,
-    } };
-    _ = cpu.execute(sub_a_c);
+    cpu.write(u8, Register8.a, 0x00);
+    cpu.write(u8, Register8.c, 0x01);
+    const sub_result = CPU.sub(cpu.read(u8, Register8.a), cpu.read(u8, Register8.c));
+    cpu.write(u8, Register8.a, sub_result.@"0");
+    cpu.flag_state().* = sub_result.@"1";
 
-    try testing.expectEqual(@as(u8, 0xFF), cpu.get_r8(.a).*);
+    try testing.expectEqual(@as(u8, 0xFF), cpu.read(u8, Register8.a));
     try testing.expectEqual(@as(u1, 0), cpu.flag_state().zero);
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().half_carry);
     try testing.expectEqual(@as(u1, 1), cpu.flag_state().carry);

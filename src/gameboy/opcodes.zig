@@ -88,18 +88,32 @@ pub const Load = struct {
     cycles: usize,
     bytes: usize,
 
-    // fn from_json_opcode_expr(opcode: JsonOpcode) !Load {
-    //     if (opcode.immediate) {
-    //         return Load{
-    //             .dest = try LoadOperand.from_json_operand(opcode.operands[0]),
-    //             .src = try LoadOperand.from_json_operand(opcode.operands[1]),
-    //             .cycles = opcode.cycles[0],
-    //             .bytes = opcode.bytes,
-    //         };
-    //     } else {
+    pub fn log(self: Load) void {
+        var src_str: [16]u8 = undefined;
+        var dest_str: [16]u8 = undefined;
 
-    //     }
-    // }
+        // Log destination
+        const src = switch (self.src) {
+            .r8 => |r| std.fmt.bufPrint(&src_str, "r8({s})", .{@tagName(r)}),
+            .r16 => |r| std.fmt.bufPrint(&src_str, "r16({s})", .{@tagName(r)}),
+            .address => |a| std.fmt.bufPrint(&src_str, "addr({s})", .{@tagName(a)}),
+            .imm8 => std.fmt.bufPrint(&src_str, "imm8", .{}),
+            .imm16 => std.fmt.bufPrint(&src_str, "imm16", .{}),
+            .sp_offset => std.fmt.bufPrint(&src_str, "sp+offset", .{}),
+        } catch unreachable;
+
+        // Log source
+        const dest = switch (self.dest) {
+            .r8 => |r| std.fmt.bufPrint(&dest_str, "r8({s})", .{@tagName(r)}),
+            .r16 => |r| std.fmt.bufPrint(&dest_str, "r16({s})", .{@tagName(r)}),
+            .address => |a| std.fmt.bufPrint(&dest_str, "addr({s})", .{@tagName(a)}),
+            .imm8 => std.fmt.bufPrint(&dest_str, "imm8", .{}),
+            .imm16 => std.fmt.bufPrint(&dest_str, "imm16", .{}),
+            .sp_offset => std.fmt.bufPrint(&dest_str, "sp+offset", .{}),
+        } catch unreachable;
+
+        std.log.info("LD {s} {s}", .{ dest, src });
+    }
 
     fn from_json_opcode(opcode: JsonOpcode) !Load {
         const dest = try LoadOperand.from_json_operand(opcode.operands[0]);
@@ -249,6 +263,16 @@ pub const Jump = struct {
     // cycles[1] = condition == false
     cycles: []const usize,
 
+    pub fn log(self: Jump) void {
+        std.log.debug("JUMP {s} {s}", .{ @tagName(self.operand), blk: {
+            break :blk switch (self.operand) {
+                .hl => |cc| @tagName(cc),
+                .a16 => |cc| @tagName(cc),
+                .e8 => |cc| @tagName(cc),
+            };
+        } });
+    }
+
     pub fn from_json_opcode(op: JsonOpcode) !Jump {
         // first identify condition
 
@@ -341,6 +365,28 @@ pub const Return = struct {
     }
 };
 
+pub const InterruptControl = union(enum) {
+    pub const EI = struct { bytes: usize = 1, cycles: usize = 4 };
+
+    reti: Return,
+    ei: EI,
+    di: EI,
+
+    pub fn from_json_opcode(op: JsonOpcode) !InterruptControl {
+        const Case = enum { EI, DI, RETI };
+        const case = std.meta.stringToEnum(Case, op.mnemonic) orelse return error.UnknownMnemonic;
+        return switch (case) {
+            .RETI => .{ .reti = Return{
+                .condition = .unconditional,
+                .bytes = 1,
+                .cycles = &.{16},
+            } },
+            .EI => .{ .ei = EI{} },
+            .DI => .{ .di = EI{} },
+        };
+    }
+};
+
 pub const Instruction = union(enum) {
     Nop: void,
     Load: Load,
@@ -354,9 +400,10 @@ pub const Instruction = union(enum) {
     Jump: Jump,
     Call: Call,
     Return: Return,
+    InterruptControl: InterruptControl,
 
     pub fn from_json_opcode(op: JsonOpcode) !Instruction {
-        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RET };
+        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RET, EI, RETI, DI };
 
         // if we dont support the instruction don't try to decode it
         const case = std.meta.stringToEnum(Instructions, op.mnemonic) orelse return error.UnknownMnemonic; // {
@@ -387,6 +434,7 @@ pub const Instruction = union(enum) {
             .JP, .JR => .{ .Jump = try Jump.from_json_opcode(op) },
             .CALL => .{ .Call = try Call.from_json_opcode(op) },
             .RET => .{ .Return = try Return.from_json_opcode(op) },
+            .EI, .DI, .RETI => .{ .InterruptControl = try InterruptControl.from_json_opcode(op) },
         };
         // }
     }
