@@ -13,6 +13,10 @@ const Jump = opcodes.Jump;
 const Call = opcodes.Call;
 const Return = opcodes.Return;
 const InterruptControl = opcodes.InterruptControl;
+const Rotation = opcodes.Rotation;
+const Shift = opcodes.Shift;
+const BitOperation = opcodes.BitOperation;
+const Swap = opcodes.Swap;
 const Instruction = opcodes.Instruction;
 
 pub const CPUError = error{
@@ -91,11 +95,11 @@ pub const CPU = struct {
     state: State = .Running,
     cycles: usize = 0,
 
-    table: ?opcodes.UnprefixedOpcodes = null,
+    table: ?opcodes.Opcodes = null,
 
     pub fn init(allocator: std.mem.Allocator) !CPU {
         return CPU{
-            .table = try opcodes.UnprefixedOpcodes.init(allocator),
+            .table = try opcodes.Opcodes.init(allocator),
         };
     }
 
@@ -271,11 +275,22 @@ pub const CPU = struct {
         }
     }
 
-    pub fn decode(self: CPU, opcode: u8) Instruction {
+    pub fn decode(self: *CPU, opcode: u8) Instruction {
         // TODO: make opcode table better
-        return Instruction.from_json_opcode(self.table.?.table[opcode]) catch |err| {
-            std.log.err("Error getting instruction from JsonOpcode - {!}", .{err});
-            return Instruction{ .Nop = {} };
+        return if (opcode == 0xCB) {
+            // Handle Prefix
+            const cb_opcode = self.pc_read(u8);
+            // std.log.debug("CB Opcode: 0x{X}", .{cb_opcode});
+            Instruction.from_json_opcode(self.table.?.cbprefixed[cb_opcode]) catch |err| {
+                std.log.err("Error getting instruction from JsonOpcode - {!}", .{err});
+                return Instruction{ .Nop = {} };
+            };
+        } else {
+            // std.log.debug("Opcode: 0x{X}", .{opcode});
+            Instruction.from_json_opcode(self.table.?.unprefixed[opcode]) catch |err| {
+                std.log.err("Error getting instruction from JsonOpcode - {!}", .{err});
+                return Instruction{ .Nop = {} };
+            };
         };
     }
 
@@ -294,6 +309,10 @@ pub const CPU = struct {
             .Call => |call_fn| self.executeCall(call_fn),
             .Return => |ret| self.executeReturn(ret),
             .InterruptControl => |inter| self.executeInterruptControl(inter),
+            .Rotate => |rot| self.executeRotation(rot),
+            .Shift => |shift| self.executeShift(shift),
+            .BitOp => |bop| self.executeBitOp(bop),
+            .Swap => |swp| self.executeSwap(swp),
         };
     }
 
@@ -703,6 +722,122 @@ pub const CPU = struct {
             else => @compileError("Invalid arithmetic type, expected u8 or u16"),
         }
         self.write(T, dest, value);
+    }
+
+    pub fn bit_test(byte: u8, bit: u3) u1 {
+        return (byte >> bit) & 1;
+    }
+
+    pub fn bit_set(byte: u8, pos: u3) u8 {
+        return byte | 1 << pos;
+    }
+
+    pub fn bit_clear(byte: u8, pos: u3) u8 {
+        return byte & ~(1 << pos);
+    }
+
+    // TODO: Cleanup?
+    pub fn executeRotation(self: *CPU, rot: Rotation) usize {
+        var target = self.read(u8, rot.r8);
+        const flags = self.flag_state();
+
+        // extract either bit 7 or bit 0 depending on direction
+        const rotated_bit = if (rot.direction == .Left) {
+            // get left most bit, shift target, replace bit 0 with carry, and set carry to bit 7
+            const b7 = self.bit_test(target, 7);
+            target <<= 1;
+            target |= flags.carry;
+            flags.carry = b7;
+            b7;
+        } else {
+            // get rightmost bit, shift target, replace bit 7 with carry, and set carry to bit 0
+            const b0 = self.bit_test(target, 0);
+            target >>= 1;
+            target |= (flags.carry << 7);
+            flags.carry = b0;
+            b0;
+        };
+
+        // on a circular rotation we bit the bit of interest in the oppo
+        if (rot.circular and rot.direction == .Left) {
+            target |= rotated_bit;
+        } else if (rot.circular and rot.direction == .Right) {
+            target |= (rotated_bit << 7);
+        }
+
+        // only when operation on A register is the zero flag always set to 0 otherwise it
+        // depends on the result
+        if (rot.r8 == .a) flags.zero = 0 else flags.zero = if (target == 0) 1 else 0;
+
+        // write result back to register
+        self.write(u8, rot.r8, target);
+        flags.subtraction = 0;
+        flags.half_carry = 0;
+
+        return rot.cycles;
+    }
+
+    pub fn executeShift(self: *CPU, shift: Shift) usize {
+        // Logical shift -> fill empty space with 0
+        // Arithmetic shift -> sign bit remains unchanged
+
+        var byte = self.read(u8, shift.r8);
+        const flags = self.flag_state();
+        const bits = .{ .b7 = self.bit_test(byte, 7), .b0 = self.bit_test(byte, 0) };
+
+        switch (shift.direction) {
+            .Left => {
+                byte <<= 1;
+                flags.carry = bits.b7;
+            },
+            .Right => {
+                byte >>= 1;
+                flags.carry = bits.b0;
+                if (shift.shift_type == .Arithmetic) byte | (bits.b7 << 7);
+            },
+        }
+
+        if (byte == 0) flags.zero = 1;
+        flags.half_carry = 0;
+        flags.subtraction = 0;
+
+        self.write(u8, shift.r8, byte);
+
+        return shift.cycles;
+    }
+
+    pub fn executeSwap(self: *CPU, swap: Swap) usize {
+        var byte = self.read(u8, swap.r8);
+        const flags = self.flag_state();
+
+        const upper_nib = (byte & 0xF0) >> 4;
+        const lower_nib = (byte & 0x0F) << 4;
+
+        byte = lower_nib | upper_nib;
+
+        flags.subtraction = 0;
+        flags.half_carry = 0;
+        flags.carry = 0;
+
+        self.write(u8, swap.r8, byte);
+
+        return swap.cycles;
+    }
+
+    pub fn executeBitOp(self: *CPU, bop: BitOperation) usize {
+        const byte = self.read(u8, bop.r8);
+        const flags = self.flag_state();
+        switch (bop.op) {
+            .Test => {
+                flags.half_carry = 1;
+                flags.subtraction = 0;
+                flags.zero = ~self.bit_test(byte, bop.bit);
+            },
+            .Set => self.write(u8, bop.r8, self.bit_set(byte, bop.bit)),
+            .Reset => self.write(u8, bop.r8, self.bit_clear(byte, bop.bit)),
+        }
+
+        return bop.cycles;
     }
 
     // ########################################

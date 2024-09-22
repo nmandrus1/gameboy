@@ -387,6 +387,87 @@ pub const InterruptControl = union(enum) {
     }
 };
 
+pub const Rotation = struct {
+    const Direction = enum { Left, Right };
+
+    direction: Direction,
+    circular: bool,
+    r8: cpu.Register8,
+    bytes: usize,
+    cycles: usize,
+
+    pub fn from_json_opcode(op: JsonOpcode) !Rotation {
+        const Case = enum { RLCA, RRCA, RLA, RRA, RLC, RRC, RL, RR };
+        const case = std.meta.stringToEnum(Case, op.mnemonic) orelse return error.UnknownMnemonic;
+
+        return switch (case) {
+            .RLCA => Rotation{ .direction = .Left, .circular = true, .r8 = .a, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RRCA => Rotation{ .direction = .Right, .circular = true, .r8 = .a, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RLA => Rotation{ .direction = .Left, .circular = false, .r8 = .a, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RRA => Rotation{ .direction = .Right, .circular = false, .r8 = .a, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RLC => Rotation{ .direction = .Left, .circular = true, .r8 = try std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RRC => Rotation{ .direction = .Right, .circular = true, .r8 = try std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RL => Rotation{ .direction = .Left, .circular = false, .r8 = try std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RR => Rotation{ .direction = .Right, .circular = false, .r8 = try std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
+        };
+    }
+};
+
+pub const Shift = struct {
+    direction: Rotation.Direction,
+    shift_type: enum { Logical, Arithmetic },
+    r8: cpu.Register8,
+    bytes: usize,
+    cycles: usize,
+
+    pub fn from_json_opcode(op: JsonOpcode) !Shift {
+        const Case = enum { SLA, SRA, SRL };
+        const case = std.meta.stringToEnum(Case, op.mnemonic) orelse return error.UnknownMnemonic;
+        const r8 = cpu.Register8.from_str(op) orelse return error.InvalidOperandName;
+
+        return switch (case) {
+            .SLA => Shift{ .direction = .Left, .shift_type = .Arithmetic, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles },
+            .SRA => Shift{ .direction = .Right, .shift_type = .Arithmetic, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles },
+            .SRL => Shift{ .direction = .Right, .shift_type = .Logical, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles },
+        };
+    }
+};
+
+// Handle bit testing and setting
+pub const BitOperation = struct {
+    op: enum { Test, Set, Reset },
+    bit: u3,
+    r8: cpu.Register8,
+    bytes: usize,
+    cycles: usize,
+
+    pub fn from_json_opcode(op: JsonOpcode) !BitOperation {
+        const Case = enum { BIT, SET, RES };
+        const case = std.meta.stringToEnum(Case, op.mnemonic);
+
+        const bit = try std.fmt.parseInt(u3, op.operands[0].name, 10);
+        const r8 = std.meta.stringToEnum(cpu.Register8, op.operands[1].name) orelse return error.InvalidOperandName;
+        const operation = switch (case) {
+            .BIT => .Test,
+            .SET => .Set,
+            .RES => .Reset,
+        };
+
+        return BitOperation{ .op = operation, .bit = bit, .r8 = r8, .cycles = op.cycles[0], .bytes = op.bytes };
+    }
+};
+
+pub const Swap = struct {
+    r8: cpu.Register8,
+    bytes: usize,
+    cycles: usize,
+
+    pub fn from_json_opcode(op: JsonOpcode) !Swap {
+        const r8 = std.meta.stringToEnum(cpu.Register8, op.operands[1].name) orelse return error.InvalidOperandName;
+        return Swap{ .r8 = r8, .cycles = op.cycles[0], .bytes = op.bytes };
+    }
+};
+
 pub const Instruction = union(enum) {
     Nop: void,
     Load: Load,
@@ -402,26 +483,17 @@ pub const Instruction = union(enum) {
     Return: Return,
     InterruptControl: InterruptControl,
 
+    // CB Prefixed
+    Rotate: Rotation,
+    Shift: Shift,
+    BitOp: BitOperation,
+    Swap: Swap,
+
     pub fn from_json_opcode(op: JsonOpcode) !Instruction {
-        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RET, EI, RETI, DI };
+        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RET, EI, RETI, DI, RLCA, RRCA, RLA, RRA, RLC, RRC, RL, RR, SLA, SRA, SRL, BIT, SET, RES, SWAP };
 
         // if we dont support the instruction don't try to decode it
-        const case = std.meta.stringToEnum(Instructions, op.mnemonic) orelse return error.UnknownMnemonic; // {
-        // try std.json.stringify(op, .{}, buf.writer());
-        // std.log.err("No attempt to decode: {s}", .{buf.items});
-
-        // buf.clearRetainingCapacity();
-        // continue;
-        // };
-
-        // {
-        // errdefer { // on error print debuf info
-        //     std.json.stringify(op, .{}, buf.writer()) catch unreachable;
-        //     std.log.err("Instruction Not Parsed: {s}", .{buf.items});
-
-        //     buf.clearRetainingCapacity();
-        //     decode_successful = false;
-        // }
+        const case = std.meta.stringToEnum(Instructions, op.mnemonic) orelse return error.UnknownMnemonic;
 
         return switch (case) {
             .NOP => .{ .Nop = {} },
@@ -435,8 +507,12 @@ pub const Instruction = union(enum) {
             .CALL => .{ .Call = try Call.from_json_opcode(op) },
             .RET => .{ .Return = try Return.from_json_opcode(op) },
             .EI, .DI, .RETI => .{ .InterruptControl = try InterruptControl.from_json_opcode(op) },
+            // CB Prefixed Opcodes
+            .RLCA, .RRCA, .RLA, .RRA, .RLC, .RRC, .RL, .RR => .{ .Rotate = try Rotation.from_json_opcode(op) },
+            .SLA, .SRA, .SRL => .{ .Shift = try Shift.from_json_opcode(op) },
+            .BIT, .SET, .RES => .{ .BitOp = try BitOperation.from_json_opcode(op) },
+            .SWAP => .{ .Swap = try Swap.from_json_opcode(op) },
         };
-        // }
     }
 };
 
@@ -454,14 +530,64 @@ const JsonOpcode = struct {
     immediate: bool,
 };
 
-const Opcodes = struct {
+pub const Opcodes = struct {
     unprefixed: [256]JsonOpcode,
     cbprefixed: [256]JsonOpcode,
+    inner_alloc: std.heap.ArenaAllocator,
+
+    pub fn init(alloc: std.mem.Allocator) !Opcodes {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+
+        const allocator = arena.allocator();
+
+        var parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, opcode_json, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
+        const parsed_unprefixed = parsed.object.get("unprefixed").?.object;
+
+        var json_op_iterator = parsed_unprefixed.iterator();
+        var unprefixed: [256]JsonOpcode = undefined;
+
+        for (0..256) |idx| {
+            const entry = json_op_iterator.next() orelse {
+                std.log.err("Json iterator stopped early at idx: {d}", .{idx});
+                return error.IteratorEndedEarly;
+            };
+
+            const json_opcode = try std.json.parseFromValueLeaky(JsonOpcode, allocator, entry.value_ptr.*, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
+            unprefixed[idx] = json_opcode;
+        }
+
+        // CB-Prefixed parsing
+        parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, opcode_json, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
+        const parsed_prefixed = parsed.object.get("unprefixed").?.object;
+
+        json_op_iterator = parsed_prefixed.iterator();
+        var prefixed: [256]JsonOpcode = undefined;
+
+        for (0..256) |idx| {
+            const entry = json_op_iterator.next() orelse {
+                std.log.err("Json iterator stopped early at idx: {d}", .{idx});
+                return error.IteratorEndedEarly;
+            };
+
+            const json_opcode = try std.json.parseFromValueLeaky(JsonOpcode, allocator, entry.value_ptr.*, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
+            prefixed[idx] = json_opcode;
+        }
+
+        return Opcodes{
+            .unprefixed = unprefixed,
+            .cbprefixed = prefixed,
+            .inner_alloc = arena,
+        };
+    }
+
+    pub fn deinit(self: *Opcodes) void {
+        self.inner_alloc.deinit();
+    }
 };
 
+// NOTE: This should be removed over time in favor of Opcodes struct
 pub const UnprefixedOpcodes = struct {
-    // const JsonTable = std.AutoArrayHashMap([4]u8, JsonOpcode);
-    byte_to_str: [256][4]u8 = undefined,
     table: [256]JsonOpcode,
     inner_alloc: std.heap.ArenaAllocator,
 
