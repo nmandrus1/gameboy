@@ -474,13 +474,6 @@ pub const UnprefixedOpcodes = struct {
         var parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, unprefixed_json, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
         const unprefixed = parsed.object.get("unprefixed").?.object;
 
-        var byte_to_str: [256][4]u8 = undefined;
-        inline for (&byte_to_str, 0..) |*str, op| {
-            str[0] = '0';
-            str[1] = 'x';
-            _ = std.fmt.formatIntBuf(@ptrCast(str[2..4]), op, 16, .upper, .{});
-        }
-
         var json_op_iterator = unprefixed.iterator();
         var table: [256]JsonOpcode = undefined;
 
@@ -495,7 +488,6 @@ pub const UnprefixedOpcodes = struct {
         }
 
         return UnprefixedOpcodes{
-            .byte_to_str = byte_to_str,
             .table = table,
             .inner_alloc = arena,
         };

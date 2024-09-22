@@ -86,7 +86,7 @@ pub const CPU = struct {
     ime: bool = false,
 
     // TODO: Rework Memory
-    memory: [0xFFFF]u8 = [_]u8{0} ** 0xFFFF,
+    memory: [0xFFFF + 1]u8 = [_]u8{0} ** (0xFFFF + 1),
 
     state: State = .Running,
     cycles: usize = 0,
@@ -486,7 +486,9 @@ pub const CPU = struct {
         const result: struct { addr: u16, cc: Jump.Condition } = switch (jmp.operand) {
             .hl => |cc| .{ .addr = self.read(u8, Register8.hl), .cc = cc },
             .a16 => |cc| .{ .addr = self.pc_read(u16), .cc = cc },
-            .e8 => |cc| .{ .addr = @as(u16, self.pc_read(u8)) + self.pc, .cc = cc },
+            // e8 is a signed integer, so we read a byte, cast it, add it to a casted pc and then cast
+            // the result back to a u16
+            .e8 => |cc| .{ .addr = @intCast(@as(i8, @bitCast(self.pc_read(u8))) +% @as(i32, @intCast(self.pc))), .cc = cc },
         };
 
         // if the condition is met, then flow through the switch statement,
@@ -643,21 +645,16 @@ pub const CPU = struct {
     /// return the Zero, Carry, Half-Carry, and Substraction flags, and it is up
     /// to the caller to ensure that the proper flags based on the return value
     pub fn sub(lhs: u8, rhs: u8) struct { u8, Flags } {
-        const B3 = 0b00001000;
-        const B7 = 0b10000000;
+        const result: u8 = lhs -% rhs;
 
-        const init_b3: u1 = @truncate((lhs & B3) >> 3);
-        const init_b7: u1 = @truncate((lhs & B7) >> 7);
+        const flags = Flags{
+            .zero = if (result == 0) 1 else 0,
+            .carry = if (rhs > lhs) 1 else 0,
+            .half_carry = if ((rhs & 0xF) > (lhs & 0xF)) 1 else 0,
+            .subtraction = 1,
+        };
 
-        const value = lhs -% rhs;
-
-        const new_b3: u1 = @truncate((value & B3) >> 3);
-        const new_b7: u1 = @truncate((value & B7) >> 7);
-
-        const zero: u1 = if (value == 0) 1 else 0;
-        // XOR relevant bits to see if they changed,
-        const flags = Flags{ .carry = init_b7 ^ new_b7, .zero = zero, .half_carry = init_b3 ^ new_b3, .subtraction = 1 };
-        return .{ value, flags };
+        return .{ result, flags };
     }
 
     /// Add to the A register, the carry flag, and the associated data
