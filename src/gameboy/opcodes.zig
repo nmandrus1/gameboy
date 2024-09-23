@@ -334,6 +334,17 @@ pub const Call = struct {
     }
 };
 
+pub const Reset = struct {
+    fn from_json_opcode(op: JsonOpcode) !Call {
+        // first identify condition
+        return Call{
+            .condition = Jump.Condition.unconditional,
+            .bytes = op.bytes,
+            .cycles = op.cycles,
+        };
+    }
+};
+
 pub const Return = struct {
     const Condition = Jump.Condition;
 
@@ -493,7 +504,7 @@ pub const Instruction = union(enum) {
     Swap: Swap,
 
     pub fn from_json_opcode(op: JsonOpcode) !Instruction {
-        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RET, EI, RETI, DI, RLCA, RRCA, RLA, RRA, RLC, RRC, RL, RR, SLA, SRA, SRL, BIT, SET, RES, SWAP };
+        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RST, RET, EI, RETI, DI, RLCA, RRCA, RLA, RRA, RLC, RRC, RL, RR, SLA, SRA, SRL, BIT, SET, RES, SWAP };
 
         // if we dont support the instruction don't try to decode it
         const case = std.meta.stringToEnum(Instructions, op.mnemonic) orelse return error.UnknownMnemonic;
@@ -508,6 +519,7 @@ pub const Instruction = union(enum) {
             .SUB, .SBC, .AND, .OR, .XOR, .CP, .CCF, .SCF, .DAA, .CPL => .{ .ALUOp = try ByteArithmetic.from_json_opcode(op) },
             .JP, .JR => .{ .Jump = try Jump.from_json_opcode(op) },
             .CALL => .{ .Call = try Call.from_json_opcode(op) },
+            .RST => .{ .Call = try Reset.from_json_opcode(op) },
             .RET => .{ .Return = try Return.from_json_opcode(op) },
             .EI, .DI, .RETI => .{ .InterruptControl = try InterruptControl.from_json_opcode(op) },
             // CB Prefixed Opcodes
@@ -562,7 +574,7 @@ pub const Opcodes = struct {
 
         // CB-Prefixed parsing
         parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, opcode_json, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed });
-        const parsed_prefixed = parsed.object.get("unprefixed").?.object;
+        const parsed_prefixed = parsed.object.get("cbprefixed").?.object;
 
         json_op_iterator = parsed_prefixed.iterator();
         var prefixed: [256]JsonOpcode = undefined;

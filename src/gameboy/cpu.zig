@@ -112,22 +112,6 @@ pub const CPU = struct {
         self.table.?.deinit();
     }
 
-    pub fn logState(self: *CPU) void {
-        std.log.info("State: {s}  Registers: A = 0x{X} [HL] = 0x{X} B = 0x{X} C = 0x{X} D = 0x{X} E = 0x{X} H = 0x{X} L = 0x{X}  PC: 0x{X}  SP: 0x{X}", .{
-            @tagName(self.state),
-            self.read(u8, Register8.a),
-            self.read(u8, Register8.hl),
-            self.read(u8, Register8.b),
-            self.read(u8, Register8.c),
-            self.read(u8, Register8.d),
-            self.read(u8, Register8.e),
-            self.read(u8, Register8.h),
-            self.read(u8, Register8.l),
-            self.pc,
-            self.sp,
-        });
-    }
-
     pub fn doctorLog(self: *CPU) void {
         std.log.info("A:{X:0>2} F:{X:0>2} B:{X:0>2} C:{X:0>2} D:{X:0>2} E:{X:0>2} H:{X:0>2} L:{X:0>2} SP:{X:0>4} PC:{X:0>4} PCMEM:{X:0>2},{X:0>2},{X:0>2},{X:0>2} ", .{
             self.read(u8, Register8.a),
@@ -198,16 +182,12 @@ pub const CPU = struct {
             Address => self.write(T, self.address_ptr(dest), src),
             // given a raw memory address, write to it
             u16 => {
-                std.log.info("Writing 0x{X} to 0x{X}", .{ src, dest });
-                if (dest == 0xFF01) {
-                    std.log.warn("Attempted write to 0xFF01: {any}", .{src});
-                }
-                if (dest == 0xFF02) std.log.warn("Attempted write to 0xFF02: {any}", .{src});
+                // if (dest == 0xFF01)  std.log.warn("Attempted write to 0xFF01: {any}", .{src});
+                // if (dest == 0xFF02) std.log.warn("Attempted write to 0xFF02: {any}", .{src});
                 std.mem.writeInt(T, @ptrCast(@alignCast(&self.memory[dest])), src, .little);
             },
             // write a byte to the register
             Register8 => {
-                std.log.info("Writing 0x{X} to Register {s}", .{ src, @tagName(dest) });
                 if (T != u8) @compileError("Cannot write non-byte value to byte register");
                 switch (dest) {
                     .hl => self.write(u8, self.read(u16, Register16.hl), src),
@@ -215,7 +195,6 @@ pub const CPU = struct {
                 }
             },
             Register16 => {
-                std.log.info("Writing 0x{X} to Register {s}", .{ src, @tagName(dest) });
                 if (T != u16) @compileError("Cannot write non-word value to 16 bit register");
                 switch (dest) {
                     .sp => self.sp = src,
@@ -268,7 +247,6 @@ pub const CPU = struct {
             .Running => {
                 self.doctorLog();
                 const opcode = self.pc_read(u8);
-                std.log.info("Opcode: 0x{X}", .{opcode});
                 const instr = self.decode(opcode);
                 return self.execute(instr);
             },
@@ -344,7 +322,7 @@ pub const CPU = struct {
     }
 
     pub fn executeLoad(self: *CPU, op: Load) usize {
-        op.log();
+        // op.log();
         switch (op.src) {
             // 8 bit load
             .r8, .imm8, .address => {
@@ -503,7 +481,7 @@ pub const CPU = struct {
 
     fn executeJump(self: *CPU, jmp: Jump) usize {
         const result: struct { addr: u16, cc: Jump.Condition } = switch (jmp.operand) {
-            .hl => |cc| .{ .addr = self.read(u8, Register8.hl), .cc = cc },
+            .hl => |cc| .{ .addr = self.read(u16, Register16.hl), .cc = cc },
             .a16 => |cc| .{ .addr = self.pc_read(u16), .cc = cc },
             // e8 is a signed integer, so we read a byte, cast it, add it to a casted pc and then cast
             // the result back to a u16
@@ -512,7 +490,6 @@ pub const CPU = struct {
 
         // if the condition is met, then flow through the switch statement,
         // otherwise return the relevant cycle count
-        std.log.debug("JUMP {s} 0x{X}", .{ @tagName(result.cc), result.addr });
         if (CPU.check_condition(result.cc, self.flag_state().*)) {
             self.jump(result.addr);
             return jmp.cycles[0];
@@ -525,7 +502,6 @@ pub const CPU = struct {
     }
 
     fn executeCall(self: *CPU, fn_call: Call) usize {
-        std.log.info("CALL", .{});
         const addr = self.pc_read(u16);
 
         // if the condition is met, then flow through the switch statement,
@@ -537,7 +513,6 @@ pub const CPU = struct {
     }
 
     fn executeReturn(self: *CPU, fn_ret: Return) usize {
-        std.log.info("RETURN", .{});
         // if the condition is met, then flow through the switch statement,
         // otherwise return the relevant cycle count
         if (CPU.check_condition(fn_ret.condition, self.flag_state().*)) {
@@ -742,20 +717,22 @@ pub const CPU = struct {
         const flags = self.flag_state();
 
         // extract either bit 7 or bit 0 depending on direction
-        const rotated_bit: u1 = if (rot.direction == .Left) {
-            // get left most bit, shift target, replace bit 0 with carry, and set carry to bit 7
-            const b7: u1 = @truncate((target >> 7) & 1);
-            target <<= 1;
-            target |= flags.carry;
-            flags.carry = b7;
-            return b7;
-        } else {
-            // get rightmost bit, shift target, replace bit 7 with carry, and set carry to bit 0
-            const b0 = CPU.bit_test(target, 0);
-            target >>= 1;
-            target |= (@as(u8, flags.carry) << 7);
-            flags.carry = b0;
-            return b0;
+        const rotated_bit: u1 = blk: {
+            if (rot.direction == .Left) {
+                // get left most bit, shift target, replace bit 0 with carry, and set carry to bit 7
+                const b7: u1 = @truncate((target >> 7) & 1);
+                target <<= 1;
+                target |= flags.carry;
+                flags.carry = b7;
+                break :blk b7;
+            } else {
+                // get rightmost bit, shift target, replace bit 7 with carry, and set carry to bit 0
+                const b0 = CPU.bit_test(target, 0);
+                target >>= 1;
+                target |= (@as(u8, flags.carry) << 7);
+                flags.carry = b0;
+                break :blk b0;
+            }
         };
 
         // on a circular rotation we bit the bit of interest in the oppo
