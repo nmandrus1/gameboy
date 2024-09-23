@@ -277,21 +277,21 @@ pub const CPU = struct {
 
     pub fn decode(self: *CPU, opcode: u8) Instruction {
         // TODO: make opcode table better
-        return if (opcode == 0xCB) {
+        if (opcode == 0xCB) {
             // Handle Prefix
             const cb_opcode = self.pc_read(u8);
             // std.log.debug("CB Opcode: 0x{X}", .{cb_opcode});
-            Instruction.from_json_opcode(self.table.?.cbprefixed[cb_opcode]) catch |err| {
+            return Instruction.from_json_opcode(self.table.?.cbprefixed[cb_opcode]) catch |err| {
                 std.log.err("Error getting instruction from JsonOpcode - {!}", .{err});
                 return Instruction{ .Nop = {} };
             };
         } else {
             // std.log.debug("Opcode: 0x{X}", .{opcode});
-            Instruction.from_json_opcode(self.table.?.unprefixed[opcode]) catch |err| {
+            return Instruction.from_json_opcode(self.table.?.unprefixed[opcode]) catch |err| {
                 std.log.err("Error getting instruction from JsonOpcode - {!}", .{err});
                 return Instruction{ .Nop = {} };
             };
-        };
+        }
     }
 
     pub fn execute(self: *CPU, instr: Instruction) usize {
@@ -725,15 +725,15 @@ pub const CPU = struct {
     }
 
     pub fn bit_test(byte: u8, bit: u3) u1 {
-        return (byte >> bit) & 1;
+        return @truncate((byte >> bit) & 1);
     }
 
     pub fn bit_set(byte: u8, pos: u3) u8 {
-        return byte | 1 << pos;
+        return byte | @as(u8, 1) << pos;
     }
 
     pub fn bit_clear(byte: u8, pos: u3) u8 {
-        return byte & ~(1 << pos);
+        return byte & ~(@as(u8, 1) << pos);
     }
 
     // TODO: Cleanup?
@@ -742,27 +742,27 @@ pub const CPU = struct {
         const flags = self.flag_state();
 
         // extract either bit 7 or bit 0 depending on direction
-        const rotated_bit = if (rot.direction == .Left) {
+        const rotated_bit: u1 = if (rot.direction == .Left) {
             // get left most bit, shift target, replace bit 0 with carry, and set carry to bit 7
-            const b7 = self.bit_test(target, 7);
+            const b7: u1 = @truncate((target >> 7) & 1);
             target <<= 1;
             target |= flags.carry;
             flags.carry = b7;
-            b7;
+            return b7;
         } else {
             // get rightmost bit, shift target, replace bit 7 with carry, and set carry to bit 0
-            const b0 = self.bit_test(target, 0);
+            const b0 = CPU.bit_test(target, 0);
             target >>= 1;
-            target |= (flags.carry << 7);
+            target |= (@as(u8, flags.carry) << 7);
             flags.carry = b0;
-            b0;
+            return b0;
         };
 
         // on a circular rotation we bit the bit of interest in the oppo
         if (rot.circular and rot.direction == .Left) {
             target |= rotated_bit;
         } else if (rot.circular and rot.direction == .Right) {
-            target |= (rotated_bit << 7);
+            target |= (@as(u8, rotated_bit) << 7);
         }
 
         // only when operation on A register is the zero flag always set to 0 otherwise it
@@ -783,7 +783,7 @@ pub const CPU = struct {
 
         var byte = self.read(u8, shift.r8);
         const flags = self.flag_state();
-        const bits = .{ .b7 = self.bit_test(byte, 7), .b0 = self.bit_test(byte, 0) };
+        const bits = .{ .b7 = CPU.bit_test(byte, 7), .b0 = CPU.bit_test(byte, 0) };
 
         switch (shift.direction) {
             .Left => {
@@ -793,7 +793,7 @@ pub const CPU = struct {
             .Right => {
                 byte >>= 1;
                 flags.carry = bits.b0;
-                if (shift.shift_type == .Arithmetic) byte | (bits.b7 << 7);
+                if (shift.shift_type == .Arithmetic) byte |= @as(u8, @intCast(bits.b7)) << 7;
             },
         }
 
@@ -831,10 +831,10 @@ pub const CPU = struct {
             .Test => {
                 flags.half_carry = 1;
                 flags.subtraction = 0;
-                flags.zero = ~self.bit_test(byte, bop.bit);
+                flags.zero = ~CPU.bit_test(byte, bop.bit);
             },
-            .Set => self.write(u8, bop.r8, self.bit_set(byte, bop.bit)),
-            .Reset => self.write(u8, bop.r8, self.bit_clear(byte, bop.bit)),
+            .Set => self.write(u8, bop.r8, CPU.bit_set(byte, bop.bit)),
+            .Reset => self.write(u8, bop.r8, CPU.bit_clear(byte, bop.bit)),
         }
 
         return bop.cycles;

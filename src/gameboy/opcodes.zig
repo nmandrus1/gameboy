@@ -405,10 +405,10 @@ pub const Rotation = struct {
             .RRCA => Rotation{ .direction = .Right, .circular = true, .r8 = .a, .bytes = op.bytes, .cycles = op.cycles[0] },
             .RLA => Rotation{ .direction = .Left, .circular = false, .r8 = .a, .bytes = op.bytes, .cycles = op.cycles[0] },
             .RRA => Rotation{ .direction = .Right, .circular = false, .r8 = .a, .bytes = op.bytes, .cycles = op.cycles[0] },
-            .RLC => Rotation{ .direction = .Left, .circular = true, .r8 = try std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
-            .RRC => Rotation{ .direction = .Right, .circular = true, .r8 = try std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
-            .RL => Rotation{ .direction = .Left, .circular = false, .r8 = try std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
-            .RR => Rotation{ .direction = .Right, .circular = false, .r8 = try std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RLC => Rotation{ .direction = .Left, .circular = true, .r8 = std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RRC => Rotation{ .direction = .Right, .circular = true, .r8 = std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RL => Rotation{ .direction = .Left, .circular = false, .r8 = std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .RR => Rotation{ .direction = .Right, .circular = false, .r8 = std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName, .bytes = op.bytes, .cycles = op.cycles[0] },
         };
     }
 };
@@ -423,19 +423,21 @@ pub const Shift = struct {
     pub fn from_json_opcode(op: JsonOpcode) !Shift {
         const Case = enum { SLA, SRA, SRL };
         const case = std.meta.stringToEnum(Case, op.mnemonic) orelse return error.UnknownMnemonic;
-        const r8 = cpu.Register8.from_str(op) orelse return error.InvalidOperandName;
+        const r8 = try cpu.Register8.from_str(op.operands[0].name);
 
         return switch (case) {
-            .SLA => Shift{ .direction = .Left, .shift_type = .Arithmetic, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles },
-            .SRA => Shift{ .direction = .Right, .shift_type = .Arithmetic, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles },
-            .SRL => Shift{ .direction = .Right, .shift_type = .Logical, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles },
+            .SLA => Shift{ .direction = .Left, .shift_type = .Arithmetic, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .SRA => Shift{ .direction = .Right, .shift_type = .Arithmetic, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles[0] },
+            .SRL => Shift{ .direction = .Right, .shift_type = .Logical, .r8 = r8, .bytes = op.bytes, .cycles = op.cycles[0] },
         };
     }
 };
 
 // Handle bit testing and setting
 pub const BitOperation = struct {
-    op: enum { Test, Set, Reset },
+    const OperationType = enum { Test, Set, Reset };
+
+    op: OperationType,
     bit: u3,
     r8: cpu.Register8,
     bytes: usize,
@@ -443,11 +445,12 @@ pub const BitOperation = struct {
 
     pub fn from_json_opcode(op: JsonOpcode) !BitOperation {
         const Case = enum { BIT, SET, RES };
-        const case = std.meta.stringToEnum(Case, op.mnemonic);
+        const case = std.meta.stringToEnum(Case, op.mnemonic) orelse return error.UnknownMnemonic;
 
         const bit = try std.fmt.parseInt(u3, op.operands[0].name, 10);
         const r8 = std.meta.stringToEnum(cpu.Register8, op.operands[1].name) orelse return error.InvalidOperandName;
-        const operation = switch (case) {
+
+        const operation: OperationType = switch (case) {
             .BIT => .Test,
             .SET => .Set,
             .RES => .Reset,
