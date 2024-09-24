@@ -335,13 +335,14 @@ pub const Call = struct {
 };
 
 pub const Reset = struct {
-    fn from_json_opcode(op: JsonOpcode) !Call {
+    bytes: u8 = 1,
+    cycles: u8 = 16,
+    addr: u16,
+
+    fn from_json_opcode(op: JsonOpcode) !Reset {
         // first identify condition
-        return Call{
-            .condition = Jump.Condition.unconditional,
-            .bytes = op.bytes,
-            .cycles = op.cycles,
-        };
+        const addr = try std.fmt.parseInt(u16, op.operands[0].name[1..], 16);
+        return Reset{ .addr = addr };
     }
 };
 
@@ -477,7 +478,7 @@ pub const Swap = struct {
     cycles: usize,
 
     pub fn from_json_opcode(op: JsonOpcode) !Swap {
-        const r8 = std.meta.stringToEnum(cpu.Register8, op.operands[1].name) orelse return error.InvalidOperandName;
+        const r8 = std.meta.stringToEnum(cpu.Register8, op.operands[0].name) orelse return error.InvalidOperandName;
         return Swap{ .r8 = r8, .cycles = op.cycles[0], .bytes = op.bytes };
     }
 };
@@ -494,6 +495,7 @@ pub const Instruction = union(enum) {
     ALUOp: ByteArithmetic,
     Jump: Jump,
     Call: Call,
+    Reset: Reset,
     Return: Return,
     InterruptControl: InterruptControl,
 
@@ -519,7 +521,7 @@ pub const Instruction = union(enum) {
             .SUB, .SBC, .AND, .OR, .XOR, .CP, .CCF, .SCF, .DAA, .CPL => .{ .ALUOp = try ByteArithmetic.from_json_opcode(op) },
             .JP, .JR => .{ .Jump = try Jump.from_json_opcode(op) },
             .CALL => .{ .Call = try Call.from_json_opcode(op) },
-            .RST => .{ .Call = try Reset.from_json_opcode(op) },
+            .RST => .{ .Reset = try Reset.from_json_opcode(op) },
             .RET => .{ .Return = try Return.from_json_opcode(op) },
             .EI, .DI, .RETI => .{ .InterruptControl = try InterruptControl.from_json_opcode(op) },
             // CB Prefixed Opcodes

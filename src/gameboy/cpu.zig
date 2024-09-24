@@ -11,6 +11,7 @@ const Decrement = opcodes.Decrement;
 const ByteArithmetic = opcodes.ByteArithmetic;
 const Jump = opcodes.Jump;
 const Call = opcodes.Call;
+const Reset = opcodes.Reset;
 const Return = opcodes.Return;
 const InterruptControl = opcodes.InterruptControl;
 const Rotation = opcodes.Rotation;
@@ -285,6 +286,7 @@ pub const CPU = struct {
             .ALUOp => |byte_op| self.executeALUOp(byte_op),
             .Jump => |jmp| self.executeJump(jmp),
             .Call => |call_fn| self.executeCall(call_fn),
+            .Reset => |rst| self.executeRst(rst),
             .Return => |ret| self.executeReturn(ret),
             .InterruptControl => |inter| self.executeInterruptControl(inter),
             .Rotate => |rot| self.executeRotation(rot),
@@ -510,6 +512,11 @@ pub const CPU = struct {
             self.call(addr);
             return fn_call.cycles[0];
         } else return fn_call.cycles[1];
+    }
+
+    fn executeRst(self: *CPU, rst: Reset) usize {
+        self.call(rst.addr);
+        return rst.cycles;
     }
 
     fn executeReturn(self: *CPU, fn_ret: Return) usize {
@@ -774,7 +781,7 @@ pub const CPU = struct {
             },
         }
 
-        if (byte == 0) flags.zero = 1;
+        flags.zero = if (byte == 0) 1 else 0;
         flags.half_carry = 0;
         flags.subtraction = 0;
 
