@@ -639,7 +639,9 @@ pub const CPU = struct {
         const partial2 = CPU.add(u8, partial.@"0", @as(u8, self.flag_state().carry));
 
         self.write(u8, Register8.a, partial2.@"0");
+        // TODO: Redundant zero flag operations
         self.flag_state().* = CPU.join_flags(partial.@"1", partial2.@"1");
+        self.flag_state().*.zero = if (partial2.@"0" == 0) 1 else 0;
     }
 
     /// Adds the sum of dest and rhs to the memory location pointed to by dest
@@ -666,7 +668,9 @@ pub const CPU = struct {
         const partial2 = CPU.sub(partial.@"0", @as(u8, self.flag_state().carry));
 
         self.write(u8, Register8.a, partial2.@"0");
-        return CPU.join_flags(partial.@"1", partial2.@"1");
+        var flags = CPU.join_flags(partial.@"1", partial2.@"1");
+        flags.zero = if (partial2.@"0" == 0) 1 else 0;
+        return flags;
     }
 
     /// returns the OR of the two flags
