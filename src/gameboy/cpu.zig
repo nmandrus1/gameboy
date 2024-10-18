@@ -75,7 +75,29 @@ pub const CPU = struct {
     };
 
     // use @bitcast to convert a byte to a field and then back again
-    const Flags = packed struct { _dead_bits: u4 = 0, carry: u1 = 0, half_carry: u1 = 0, subtraction: u1 = 0, zero: u1 = 0 };
+    const Flags = packed struct {
+        _dead_bits: u4 = 0,
+        carry: u1 = 0,
+        half_carry: u1 = 0,
+        subtraction: u1 = 0,
+        zero: u1 = 0,
+
+        fn test_carry(self: *Flags) bool {
+            return self.carry == 1;
+        }
+
+        fn test_half_carry(self: *Flags) bool {
+            return self.half_carry == 1;
+        }
+
+        fn test_subtraction(self: *Flags) bool {
+            return self.subtraction == 1;
+        }
+
+        fn test_zero(self: *Flags) bool {
+            return self.zero == 1;
+        }
+    };
     const Flag = union(enum) { carry: u1, half_carry: u1, subtraction: u1, zero: u1 };
 
     // interrupt flags
@@ -434,7 +456,7 @@ pub const CPU = struct {
             .CCF => .{ .carry = ~self.flag_state().carry, .zero = self.flag_state().zero },
             .SCF => .{ .carry = 1, .zero = self.flag_state().zero },
             .DAA => blk: {
-                std.log.warn("DAA Instruction not Implemented!", .{});
+                self.daa();
                 break :blk self.flag_state().*;
             },
             .CPL => blk: {
@@ -837,6 +859,29 @@ pub const CPU = struct {
         }
 
         return bop.cycles;
+    }
+
+    pub fn daa(self: *CPU) void {
+        // https://forums.nesdev.org/viewtopic.php?t=15944
+
+        // note: assumes a is a uint8_t and wraps from 0xff to 0
+        const flags = self.flag_state();
+        var acc = self.read(u8, Register8.a);
+        if (!flags.test_subtraction()) { // after an addition, adjust if (half-)carry occurred or if result is out of bounds
+            if (flags.test_carry() or acc > 0x99) {
+                acc +%= 0x60;
+                flags.carry = 1;
+            }
+            if (flags.test_half_carry() or (acc & 0x0f) > 0x09) acc +%= 0x6;
+        } else { // after a subtraction, only adjust if (half-)carry occurred
+            if (flags.test_carry()) acc -%= 0x60;
+            if (flags.test_half_carry()) acc -%= 0x6;
+        }
+        // these flags are always updated
+        flags.zero = @intFromBool(acc == 0); // the usual z flag
+        flags.half_carry = 0; // h flag is always cleared
+
+        self.write(u8, Register8.a, acc);
     }
 
     // ########################################
