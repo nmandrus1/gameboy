@@ -333,7 +333,8 @@ pub const CPU = struct {
     pub fn stackPop(self: *CPU, r16: Register16) void {
         defer self.sp += 2;
         // read value from stack and write it to the register
-        const popped = self.read(u16, self.sp);
+        var popped = self.read(u16, self.sp);
+        if (r16 == .af) popped &= 0xfff0;
         self.write(u16, r16, popped);
     }
 
