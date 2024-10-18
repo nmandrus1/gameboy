@@ -746,16 +746,17 @@ pub const CPU = struct {
             }
         };
 
-        // on a circular rotation we bit the bit of interest in the oppo
+        // on circular rotation we overwrite the carry bit with
+        // whatever was in bit7
         if (rot.circular and rot.direction == .Left) {
-            target |= rotated_bit;
+            target = (target & 0b11111110) | rotated_bit;
         } else if (rot.circular and rot.direction == .Right) {
-            target |= (@as(u8, rotated_bit) << 7);
+            target = (target & 0b01111111) | (@as(u8, rotated_bit) << 7);
         }
 
         // only when operation on A register is the zero flag always set to 0 otherwise it
         // depends on the result
-        if (rot.r8 == .a) flags.zero = 0 else flags.zero = if (target == 0) 1 else 0;
+        if (rot.r8 == .a and rot.bytes == 1) flags.zero = 0 else flags.zero = if (target == 0) 1 else 0;
 
         // write result back to register
         self.write(u8, rot.r8, target);
@@ -806,6 +807,7 @@ pub const CPU = struct {
         flags.subtraction = 0;
         flags.half_carry = 0;
         flags.carry = 0;
+        flags.zero = if (byte == 0) 1 else 0;
 
         self.write(u8, swap.r8, byte);
 
