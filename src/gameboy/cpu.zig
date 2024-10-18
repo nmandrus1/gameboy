@@ -366,8 +366,7 @@ pub const CPU = struct {
                 .r16 => |r16| self.read(u16, r16),
                 .imm16 => self.pc_read(u16),
                 .sp_offset => blk: {
-                    self.add_sp_e8();
-                    break :blk self.sp;
+                    break :blk self.add_sp_e8();
                 },
                 else => unreachable,
             },
@@ -386,7 +385,7 @@ pub const CPU = struct {
                 return add_instr.cycles;
             },
             .e8 => { // go ahead and execute special function
-                self.add_sp_e8();
+                self.sp = self.add_sp_e8();
                 return add_instr.cycles;
             },
         };
@@ -621,14 +620,24 @@ pub const CPU = struct {
     }
 
     /// Function to handle specific instructions where immediate data is added to SP
-    pub fn add_sp_e8(self: *CPU) void {
-        const lsb: u8 = @truncate(self.sp >> 8);
+    pub fn add_sp_e8(self: *CPU) u16 {
         const e8 = self.pc_read(u8);
+        const lsb: u8 = @truncate(self.sp);
         const flags = CPU.add(u8, lsb, e8).@"1";
 
-        self.set_flag(.{ .carry = flags.carry });
-        self.set_flag(.{ .half_carry = flags.half_carry });
-        self.sp += e8;
+        const signed_e8: i32 = @intCast(@as(i8, @bitCast(e8)));
+        const signed_sp = @as(i32, self.sp);
+
+        // add and collect possible overflow bit
+        const add_result: i16 = @truncate(signed_sp + signed_e8);
+        const new_sp: u16 = @bitCast(add_result);
+
+        // If there was a carry in bit 3, then
+        // const half_carry: u1 = if (new_sp & 0x10 != self.sp & 0x10) 1 else 0;
+        // const carry: u1 = if (new_sp & 0x0100 != self.sp & 0x0100) 1 else 0;
+
+        self.flag_state().* = Flags{ .carry = flags.carry, .half_carry = flags.half_carry, .zero = 0, .subtraction = 0 };
+        return new_sp;
     }
 
     /// Add to the A register, the carry flag, and the associated data
