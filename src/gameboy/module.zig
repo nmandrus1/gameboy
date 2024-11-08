@@ -18,10 +18,11 @@ const Scheduler = struct {
     }
 
     /// Pop event from queue, and run the cpu until the event needs to be handled
-    fn runUntilNextEvent(self: *Scheduler, cpu: *CPU) EventType {
+    fn runUntilNextEvent(self: *Scheduler, cpu: anytype) EventType {
         const next = self.events.removeOrNull().?;
         while (self.cycles < next.when) : (self.cycles += cpu.step()) {
             if (cpu.pc == cpu.memory.len) return .Quit;
+            // const interrupt = cpu.poll_interrupts() orelse continue;
         }
         return next.event_type;
     }
@@ -37,13 +38,14 @@ const Scheduler = struct {
     };
 
     const EventType = enum {
-        UserInput,
+        Joypad,
         SerialTransfer,
+        Vblank,
         Quit,
     };
 
     // run CPU until next
-    fn run(cpu: *CPU) !void {
+    fn run(cpu: anytype) !void {
         // initialize scheduler, load first events
 
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -55,30 +57,27 @@ const Scheduler = struct {
             .cycles = 0,
         };
 
-        // buffered I/O to stdout
-        var stdout = std.io.getStdOut();
-        var buffered_stdout = std.io.bufferedWriter(stdout.writer());
-        defer buffered_stdout.flush() catch unreachable;
-        const writer = buffered_stdout.writer();
+        // const writer = buffered_stdout.writer();
 
         // load first events
-        scheduler.queue(.SerialTransfer, 500);
+        scheduler.queue(.SerialTransfer, 1000000);
 
         // main loop
         while (true) {
             const event = scheduler.runUntilNextEvent(cpu);
             switch (event) {
                 .SerialTransfer => {
-                    cpu.serialTransfer(writer);
-                    scheduler.queue(.SerialTransfer, 500);
+                    cpu.writer.flush() catch unreachable;
+                    scheduler.queue(.SerialTransfer, 1000000);
                 },
-                .UserInput => {},
                 .Quit => return,
+                .Vblank => scheduler.queue(.Vblank, 70000),
+                else => {},
             }
         }
     }
 
-    pub fn runInteractive(cpu: *CPU) !void {
+    pub fn runInteractive(cpu: anytype) !void {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
 
@@ -87,12 +86,6 @@ const Scheduler = struct {
             .events = EventQueue.init(allocator, {}),
             .cycles = 0,
         };
-
-        // buffered I/O to stdout
-        var stdout = std.io.getStdOut();
-        var buffered_stdout = std.io.bufferedWriter(stdout.writer());
-        defer buffered_stdout.flush() catch unreachable;
-        const writer = buffered_stdout.writer();
 
         // load first events
         scheduler.queue(.SerialTransfer, 500);
@@ -118,19 +111,24 @@ const Scheduler = struct {
 
             switch (event) {
                 .SerialTransfer => {
-                    cpu.serialTransfer(writer);
                     scheduler.queue(.SerialTransfer, 500);
                 },
-                .UserInput => {},
                 .Quit => return,
+                else => {},
             }
         }
     }
 };
 
 pub fn run(rom: []const u8, allocator: std.mem.Allocator, interative: bool) !void {
-    var cpu = try CPU.init(allocator);
+
+    // Using with stdout
+    var stdout = std.io.getStdOut();
+    const buffered = std.io.bufferedWriter(stdout.writer());
+    var cpu = try CPU(@TypeOf(buffered)).init(allocator, buffered);
     defer cpu.deinit();
+
     cpu.loadROM(rom);
+
     if (interative) try Scheduler.runInteractive(&cpu) else try Scheduler.run(&cpu);
 }

@@ -506,7 +506,7 @@ pub const Instruction = union(enum) {
     Swap: Swap,
 
     pub fn from_json_opcode(op: JsonOpcode) !Instruction {
-        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RST, RET, EI, RETI, DI, RLCA, RRCA, RLA, RRA, RLC, RRC, RL, RR, SLA, SRA, SRL, BIT, SET, RES, SWAP };
+        const Instructions = enum { NOP, LD, LDH, PUSH, POP, ADD, INC, DEC, ADC, SUB, SBC, AND, OR, XOR, CP, CCF, SCF, DAA, CPL, JP, JR, CALL, RST, RET, EI, RETI, DI, RLCA, RRCA, RLA, RRA, RLC, RRC, RL, RR, SLA, SRA, SRL, BIT, SET, RES, SWAP, STOP };
 
         // if we dont support the instruction don't try to decode it
         const case = std.meta.stringToEnum(Instructions, op.mnemonic) orelse return error.UnknownMnemonic;
@@ -529,6 +529,8 @@ pub const Instruction = union(enum) {
             .SLA, .SRA, .SRL => .{ .Shift = try Shift.from_json_opcode(op) },
             .BIT, .SET, .RES => .{ .BitOp = try BitOperation.from_json_opcode(op) },
             .SWAP => .{ .Swap = try Swap.from_json_opcode(op) },
+            // TODO
+            .STOP => .{ .Nop = {} },
         };
     }
 };
