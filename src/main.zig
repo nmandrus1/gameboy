@@ -14,26 +14,12 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     // Check if enough arguments were provided
-    if (args.len < 2) {
-        std.debug.print("Usage: {s} [--interactive|-i] <rom_file>\n", .{args[0]});
+    if (args.len < 1) {
+        std.debug.print("Usage: {s} <rom_file>\n", .{args[0]});
         return error.InvalidArgument;
     }
 
-    var interactive_mode = false;
-    var filename: []const u8 = undefined;
-
-    // Parse arguments
-    if (std.mem.eql(u8, args[1], "--interactive") or std.mem.eql(u8, args[1], "-i")) {
-        if (args.len < 3) {
-            std.debug.print("Error: ROM file not specified.\n", .{});
-            std.debug.print("Usage: {s} [--interactive|-i] <rom_file>\n", .{args[0]});
-            return error.InvalidArgument;
-        }
-        interactive_mode = true;
-        filename = args[2];
-    } else {
-        filename = args[1];
-    }
+    const filename: []const u8 = args[1];
 
     // Open the file
     const file = try std.fs.cwd().openFile(filename, .{});
@@ -53,5 +39,5 @@ pub fn main() !void {
     }
 
     // Run the emulator
-    try gameboy.run(rom_data, allocator, interactive_mode);
+    try gameboy.run(rom_data, allocator);
 }

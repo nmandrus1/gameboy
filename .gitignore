@@ -4,3 +4,4 @@ zig-out
 target
 tests
 gameboy-doctor
+pandocs

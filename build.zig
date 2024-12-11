@@ -28,6 +28,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const exe_check = b.addExecutable(.{
+        .name = "gameboi",
+        .root_source_file = b.path("src/gameboy/module.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     exe.root_module.addImport("gameboy", gameboy_module);
 
     // This declares intent for the executable to be installed into the
@@ -82,4 +89,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
+
+    const check = b.step("check", "Check if the gameboy module compiles");
+    check.dependOn(&exe_check.step);
 }
