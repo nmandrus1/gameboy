@@ -25,19 +25,6 @@ pub fn main() !void {
     const file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();
 
-    // Get the file size
-    const file_size = try file.getEndPos();
-
-    // Allocate memory for the ROM data
-    const rom_data = try allocator.alloc(u8, file_size);
-    defer allocator.free(rom_data);
-
-    // Read the file contents into the slice
-    const bytes_read = try file.readAll(rom_data);
-    if (bytes_read != file_size) {
-        return error.IncompleteRead;
-    }
-
     // Run the emulator
-    try gameboy.run(rom_data, allocator);
+    try gameboy.run(file, allocator);
 }
