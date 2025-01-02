@@ -86,7 +86,7 @@ LCDC: u8 = 0,
 STAT: LCDStatus = .{},
 SCY: u8 = 0,
 SCX: u8 = 0,
-LY: u8 = 0,
+LY: u8 = 0x90,
 LYC: u8 = 0,
 DMA: u8 = 0,
 BGP: u8 = 0,
@@ -95,7 +95,11 @@ OBP1: u8 = 0,
 WY: u8 = 0,
 WX: u8 = 0,
 
-pub fn init(allocator: std.mem.Allocator, rom: std.fs.File) !Bus {
+pub fn init(allocator: std.mem.Allocator, rom_file: std.fs.File) !Bus {
+
+    // read entire rom
+    const rom = try rom_file.readToEndAlloc(allocator, 0x800000);
+
     var bus = Bus{
         .cart = try Cartridge.init(allocator, rom),
     };
@@ -137,7 +141,8 @@ pub fn write(self: *Bus, addr: u16, value: u8) void {
         0xFF41 => self.writeLCDStatus(value),
         0xFF42 => self.SCY = value,
         0xFF43 => self.SCX = value,
-        0xFF44 => {}, // LY is read-only
+        // LY is read-only
+        0xFF44 => {},
         0xFF45 => self.LYC = value,
         0xFF46 => self.DMA = value,
         0xFF47 => self.BGP = value,
@@ -146,7 +151,7 @@ pub fn write(self: *Bus, addr: u16, value: u8) void {
         0xFF4A => self.WY = value,
         0xFF4B => self.WX = value,
         // High RAM (HRAM)
-        0xFF80...0xFFFE => self.hram[0xFF8E - addr] = value,
+        0xFF80...0xFFFE => self.hram[addr - 0xFF80] = value,
         // Interrupt Enable register
         0xFFFF => self.IE = @bitCast(value),
         else => {},

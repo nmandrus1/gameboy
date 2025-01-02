@@ -27,7 +27,7 @@ pub const MBCError = error{
 };
 
 // Up to 2MB of switchable 16KiB Memory Banks
-const ROM = struct { data: []u8, banks: []ROMBankPtr, bank: u8 = 0 };
+const ROM = struct { data: []u8, banks: []ROMBankPtr, bank: u8 = 1 };
 
 /// Up to 32 KiB of RAM that can be switched
 const RAM = struct { data: []u8, banks: []RAMBankPtr, bank: u8 = 0 };
@@ -63,11 +63,9 @@ pub fn init(alloc: Allocator, rom_banks: u16, ram_banks: u8, rom_data: []const u
     var result = MBC1{ .bank_bits = @intCast(std.math.log2(rom_banks)), .allocator = alloc, .rom = .{
         .data = try alloc.dupe(u8, rom_data),
         .banks = try alloc.alloc(ROMBankPtr, rom_banks),
-        .bank = 0,
     }, .ram = .{
         .data = try alloc.alloc(u8, @as(u16, ram_banks) * 0x2000),
         .banks = try alloc.alloc(RAMBankPtr, ram_banks),
-        .bank = 0,
     } };
 
     // create a list of pointers to each ROM & RAM bank

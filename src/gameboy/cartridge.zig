@@ -35,10 +35,7 @@ pub const Cartridge = union(enum) {
     }
 
     /// initialize Cartridge
-    pub fn init(allocator: Allocator, rom_file: std.fs.File) !Cartridge {
-        // read entire rom
-        const rom = try rom_file.readToEndAlloc(allocator, 0x800000);
-
+    pub fn init(allocator: Allocator, rom: []const u8) !Cartridge {
         // read cartridge header
         const cart_header = rom[0..0x150];
         const cart_type = cart_header[0x0147];

@@ -339,7 +339,7 @@ pub fn pc_read(self: *CPU, comptime T: type) T {
 pub fn step(self: *CPU) usize {
     // switch (self.state) {
     //     .Running => {
-    // self.doctorLog();
+    self.doctorLog();
 
     if (self.poll_interrupts()) |int| {
         // An interrupt has been requested
