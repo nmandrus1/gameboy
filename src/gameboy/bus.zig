@@ -57,6 +57,25 @@ const LCDStatus = packed struct {
     // read only
     lyc_eq_ly: u1 = 0,
     ppu_mode: u2 = 0,
+
+    fn vramAccessible(self: LCDStatus) bool {
+        return self.STAT.ppu_mode != 3;
+    }
+
+    fn oamAccessible(self: LCDStatus) bool {
+        return self.STAT.ppu_mode < 2;
+    }
+};
+
+const LCDControl = packed struct {
+    lcd_enable: bool,
+    window_map: u1,
+    window_enable: bool,
+    tiles: u1,
+    bg_map: u1,
+    obj_size: u1,
+    obj_enable: bool,
+    bg_and_window_enable: bool,
 };
 
 // 8 KiB VRAM + 8KiB of Work RAM + 158 bytes of OAM + 126 Bytes of HRAM
@@ -82,7 +101,7 @@ TMA: u8 = 0,
 TAC: u8 = 0,
 IF: InterruptFlags = .{},
 IE: InterruptFlags = .{},
-LCDC: u8 = 0,
+LCDC: LCDControl = @bitCast(0),
 STAT: LCDStatus = .{},
 SCY: u8 = 0,
 SCX: u8 = 0,
@@ -117,7 +136,7 @@ pub fn write(self: *Bus, addr: u16, value: u8) void {
         // ROM
         0x0000...0x7FFF => self.cart.write(addr, value),
         // VRAM
-        0x8000...0x9FFF => if (self.vramAccessible()) {
+        0x8000...0x9FFF => if (self.STAT.vramAccessible()) {
             self.vram[addr - 0x8000] = value;
         },
         // Cartridge RAM
@@ -127,7 +146,7 @@ pub fn write(self: *Bus, addr: u16, value: u8) void {
         // Echo RAM (mirror of C000-DDFF)
         0xE000...0xFDFF => self.wram[addr - 0xE000] = value,
         // Object attribute memory (OAM)
-        0xFE00...0xFE9F => if (self.oamAccessible()) {
+        0xFE00...0xFE9F => if (self.STAT.oamAccessible()) {
             self.oam[addr - 0xFE00] = value;
         },
         // Not Usable
@@ -143,7 +162,10 @@ pub fn write(self: *Bus, addr: u16, value: u8) void {
         0xFF43 => self.SCX = value,
         // LY is read-only
         0xFF44 => {},
-        0xFF45 => self.LYC = value,
+        0xFF45 => {
+            self.LYC = value;
+            if (self.LYC == self.LY) self.STAT.lyc_eq_ly = 1;
+        },
         0xFF46 => self.DMA = value,
         0xFF47 => self.BGP = value,
         0xFF48 => self.OBP0 = value,
@@ -163,7 +185,7 @@ pub fn read(self: *Bus, addr: u16) u8 {
         // ROM
         0x0000...0x7FFF => self.cart.read(addr),
         // VRAM
-        0x8000...0x9FFF => if (self.vramAccessible()) self.vram[addr - 0x8000] else 0xFF,
+        0x8000...0x9FFF => if (self.STAT.vramAccessible()) self.vram[addr - 0x8000] else 0xFF,
         // Cartridge RAM
         0xA000...0xBFFF => self.cart.read(addr),
         // Work RAM
@@ -171,7 +193,7 @@ pub fn read(self: *Bus, addr: u16) u8 {
         // Echo RAM (mirror of C000-DDFF)
         0xE000...0xFDFF => 0xFF,
         // Object attribute memory (OAM)
-        0xFE00...0xFE9F => if (self.oamAccessible()) self.oam[addr - 0xFE00] else 0xFF,
+        0xFE00...0xFE9F => if (self.STAT.oamAccessible()) self.oam[addr - 0xFE00] else 0xFF,
         // Not Usable
         0xFEA0...0xFEFF => 0xFF,
         // I/O Registers
@@ -214,14 +236,6 @@ fn writeLCDStatus(self: *Bus, value: u8) void {
     self.STAT.mode2_select = casted.mode2_select;
     self.STAT.mode1_select = casted.mode1_select;
     self.STAT.mode0_select = casted.mode0_select;
-}
-
-fn vramAccessible(self: Bus) bool {
-    return self.STAT.ppu_mode != 3;
-}
-
-fn oamAccessible(self: Bus) bool {
-    return self.STAT.ppu_mode < 2;
 }
 
 /// helper function to write SB to buffer
