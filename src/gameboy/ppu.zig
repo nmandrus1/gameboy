@@ -33,26 +33,12 @@ const PPUMode = enum(u2) {
     Draw = 3, // Mode 3
 };
 
-const FifoState = enum {
-    GetTile,
-    GetDataLow,
-    GetDataHigh,
-    Sleep,
-    Push,
-
-    // advance State Machine
-    fn next(self: *FifoState) FifoState {
-        var next_state = @intFromEnum(self) + 1;
-        if (next_state > 4) next_state = 0;
-        self = @enumFromInt(next_state);
-    }
-};
-
 const PPUState = union(PPUMode) {
     HBlank: void,
     VBlank: void,
     Scan: void,
-    Draw: FifoState,
+    // Keep a copy of a PixelFifo that manages its own state
+    Draw: PixelFifo,
 };
 
 state: PPUMode,
@@ -61,14 +47,12 @@ bus: *Bus,
 // 1 scanline = 456 dots
 // 144 scanlines = 65664 dots
 // 144 scanlines + VBlank => 65664 + 4560 = 70224
-/// # of dots advanced in this frame
+/// number of dots advanced in this frame
 frame_dots: usize = 0,
 scanline_dots: u16 = 0,
 
 objects: [10]OAM = [_]OAM{OAM{}} ** 10,
 tile: ?Tile = null,
-tile_x: u5,
-tile_y: u5,
 
 /// Run the PPU for the specified number of dots
 pub fn step(self: *PPU, dots: u8) void {
@@ -90,8 +74,8 @@ pub fn step(self: *PPU, dots: u8) void {
                 break :blk self.waitForOamScanEnd(remaining);
             },
             // Peform a FIFO step & advance state machine
-            .Draw => |render_state| switch (render_state) {
-                .GetTile => self.getTile(),
+            .Draw => |fifo| switch (fifo.state) {
+                .GetTile => fifo.getTile(),
             },
         };
     }
@@ -172,54 +156,107 @@ fn waitForOamScanEnd(self: *PPU, dots: u8) usize {
         return 0;
     } else {
         // OAM Scan is done
-        self.state = .{ .Draw = .GetTile };
+        self.state = .{ .Draw = PixelFifo.init(self) };
         self.tile_x = 0;
         self.tile_y = 0;
         return (dots + self.scanline_dots) - 80;
     }
 }
 
-/// Gather the data necessary to compose the row of pixels to be rendered
-fn prepareScanline(self: *PPU) void {
-    const VRAM = self.bus.vram;
-    const TILE_DATA: []Tile = @ptrCast(VRAM[0..0x1800]);
-    const BLOCK0: [128]Tile = if (self.bus.LCDC.tiles == 1) TILE_DATA[0..0x800] else TILE_DATA[0x1000..0x1800];
-    const BLOCK1: [128]Tile = TILE_DATA[0x0800..0x1000];
+// PIXEL FIFO
 
-    const tile_row = (self.bus.LY + self.bus.SCY) / 8;
-    const pixel_row = (self.bus.LY + self.bus.SCY) % 8;
+const FifoState = enum {
+    GetTile,
+    GetDataLow,
+    GetDataHigh,
+    Sleep,
+    Push,
 
-    // fetch background (32x32 Tile Map)
-    const bg_map = if (self.bus.LCDC.bg_map == 0) VRAM[0x1800..0x1C00] else VRAM[0x1C00..0x2000];
-    const bg_map_row = bg_map[32 * tile_row .. 32 * (tile_row + 1)];
-    var bg_tiles: [32]Tile = undefined;
-    mapToTiles(bg_map_row, bg_tiles, BLOCK0, BLOCK1);
+    // advance State Machine
+    fn next(self: *FifoState) FifoState {
+        var next_state = @intFromEnum(self) + 1;
+        if (next_state > 4) next_state = 0;
+        self = @enumFromInt(next_state);
+    }
+};
 
-    // fetch window (32x32 Tile Map)
-    const win_map = if (self.bus.LCDC.window_map == 0) VRAM[0x1800..0x1C00] else VRAM[0x1C00..0x2000];
-    const win_map_row = win_map[32 * tile_row .. 32 * (tile_row + 1)];
-    var win_tiles: [32]Tile = undefined;
-    mapToTiles(win_map_row, win_tiles, BLOCK0, BLOCK1);
+const PixelFifo = struct {
+    state: FifoState = .GetTile,
 
-    // overlay window
+    // These track the current tile being fetched
+    bg_tile_x: u8 = 0,
+    window_tile_x: u8 = 0,
+    fetch_x: u8 = 0, // Position within the 32-tile map row
 
-    // add sprites
-}
+    // Current tile data being processed
+    tile: Tile = [_]u8{0} ** 16,
 
-/// Helper function to
-fn mapToTiles(tile_map: []const u8, tiles: []u8, block0: []const Tile, block1: []const Tile) void {
-    for (tile_map, 0..) |id, index| {
-        // id specifies which tile in the tile data we want
-        if (id > 127) {
-            tiles[index] = block1[id - 128];
-        } else {
-            tiles[index] = block0[id];
+    // FIFO for holding pixels
+    bg_fifo: [16]u8 = [_]u8{0} ** 16,
+    bg_fifo_size: u8 = 0,
+
+    // reference to PPU data
+    ppu: *const PPU,
+
+    fn init(ppu: *const PPU) PixelFifo {
+        var fifo = PixelFifo{};
+        fifo.ppu = ppu;
+        return fifo;
+    }
+
+    /// Helper function to copy Tile data from map to tiles slice
+    fn mapToTiles(tile_map: []const u8, tiles: []u8, block0: []const Tile, block1: []const Tile) void {
+        for (tile_map, 0..) |id, index| {
+            // id specifies which tile in the tile data we want
+            if (id > 127) {
+                tiles[index] = block1[id - 128];
+            } else {
+                tiles[index] = block0[id];
+            }
         }
     }
-}
 
-fn getTile(self: *PPU) u8 {
+    /// Fetch the tile that contains the pixel being pushed to the FIFO
+    fn getTile(self: *PixelFifo) void {
+        const WX = self.ppu.bus.WX;
+        const WY = self.ppu.bus.WY;
+        const LY = self.ppu.bus.LY;
 
-    // this step takes 2 dots
-    return 2;
-}
+        const VRAM = self.ppu.bus.vram;
+        const TILE_DATA: []Tile = @ptrCast(VRAM[0..0x1800]);
+        const BLOCK0: [128]Tile = if (self.ppu.bus.LCDC.tiles == 1) TILE_DATA[0..0x800] else TILE_DATA[0x1000..0x1800];
+        const BLOCK1: [128]Tile = TILE_DATA[0x0800..0x1000];
+
+        // Check if the window is overlayed at the current pixel
+        if (self.ppu.bus.LCDC.window_enable and LY >= WY and self.fetch_x >= WX - 7) {
+            // fetch window tile
+            // determine tile map
+            const win_map = if (self.bus.LCDC.window_map == 0) VRAM[0x1800..0x1C00] else VRAM[0x1C00..0x2000];
+            // get tile id
+            const id = win_map[32 * WY + (WX - 7)];
+            // fetch actual tile
+            self.tile = if (id > 127) BLOCK1[id - 128] else BLOCK0[id];
+        } else {
+            // fetch bg tile
+            const SCY = self.ppu.bus.SCY;
+            const SCX = self.ppu.bus.SCX;
+            const bg_map = if (self.ppu.bus.LCDC.bg_map == 0) VRAM[0x1800..0x1C00] else VRAM[0x1C00..0x2000];
+            const id = bg_map[((LY + SCY) & 255) * 32 + (SCX / 8) + self.fetch_x];
+            self.tile = if (id > 127) BLOCK1[id - 128] else BLOCK0[id];
+        }
+    }
+
+    fn getWindowTile() void {}
+
+    fn getBackgroundTile() void {}
+
+    /// Check LCDC and return the appropriate Tile Map
+    fn getWindowTileMap(self: *PixelFifo) []u8 {
+        return if (self.bus.LCDC.window_map == 0) self.bus.vram[0x1800..0x1C00] else self.bus.vram[0x1C00..0x2000];
+    }
+
+    /// Check LCDC and return the appropriate Tile Map
+    fn getBackgroundTileMap(self: *PixelFifo) []u8 {
+        return if (self.bus.LCDC.bg_map == 0) self.bus.vram[0x1800..0x1C00] else self.bus.vram[0x1C00..0x2000];
+    }
+};

@@ -12,6 +12,7 @@ const Bus = @import("bus.zig");
 const System = struct {
     cpu: CPU,
     bus: Bus,
+    ppu: PPU,
 };
 
 // Event scheduler for Gameboy
@@ -29,11 +30,20 @@ const Scheduler = struct {
         self.events.add(.{ .event_type = etype, .when = self.cycles + in }) catch unreachable;
     }
 
-    /// Pop event from queue, and run the cpu until the event needs to be handled
-    fn runUntilNextEvent(self: *Scheduler, cpu: *CPU) EventType {
+    /// Pop event from queue, and run the cpu & ppu until the event needs to be handled
+    fn runUntilNextEvent(self: *Scheduler, cpu: *CPU, ppu: *PPU) EventType {
         const next = self.events.removeOrNull().?;
-        while (self.cycles < next.when) : (self.cycles += cpu.step()) {
+        while (self.cycles < next.when) {
+            // execute 1 cpu instruction
+            const step_cycles = cpu.step();
+            // run ppu for the same number of dots
+            ppu.step(step_cycles);
+
+            self.cycles += step_cycles;
+
             if (cpu.pc == 0xFFFF) return .Quit;
+
+            // check for interrupts
             // const interrupt = cpu.poll_interrupts() orelse continue;
         }
         return next.event_type;
