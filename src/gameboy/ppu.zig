@@ -61,7 +61,8 @@ pub fn step(self: *PPU, dots: u8) void {
 
     // run PPU
     while (remaining > 0) {
-        remaining = switch (self.state) {
+        // Subtract the number of dots consumed from the total budget for this step
+        remaining -= switch (self.state) {
             // wait for this scanline to end
             .HBlank => self.waitForScanlineEnd(remaining),
             // wait for this frame to end
@@ -76,6 +77,8 @@ pub fn step(self: *PPU, dots: u8) void {
             // Peform a FIFO step & advance state machine
             .Draw => |fifo| switch (fifo.state) {
                 .GetTile => fifo.getTile(),
+                .GetDataLow => fifo.getTileLow(),
+                .GetDataHigh => fifo.getTileHigh(),
             },
         };
     }
@@ -85,13 +88,12 @@ pub fn step(self: *PPU, dots: u8) void {
 }
 
 /// Advance the PPU state a certain number of dots
-/// This function returns the number of leftover dots to compute this PPU step
-/// a return value of 0 means that all dots were spend waiting on HBlank
+/// This function returns the number of dots used to compute this PPU step
 fn waitForScanlineEnd(self: *PPU, dots: u8) usize {
     // Calculate dots until the end of the current HBlank
     if (self.scanline_dots + dots < 456) {
         self.scanline_dots += dots;
-        return 0;
+        return dots;
     } else {
         // Scanline ends somewhere in the next few dots
 
@@ -102,24 +104,24 @@ fn waitForScanlineEnd(self: *PPU, dots: u8) usize {
         self.frame_dots += 456;
         if (self.frame_dots < 65664) self.state = .Scan else self.state = .VBlank;
 
-        // Example: This scanline has 450 dots already processed, and we have 10 more dots
-        // we finish this scanline, and return 4 remaining dots of PPU time
-        return (dots + self.scanline_dots) - 456;
+        // Example: Suppose this scanline has 450 dots already processed, and we have 10 more dots.
+        // We finish this scanline, and return 6 since that is how many dots we needed to
+        // finish the scanline
+        // 6 = 456 - 450
+        return 456 - self.scanline_dots;
     }
 }
 
 /// Advance the PPU state a certain number of dots
-/// This function returns the number of leftover dots to compute this PPU step
-/// a return value of 0 means that all dots were spend waiting on VBlank
+/// This function returns the number of dots consumed during this step
 fn waitForFrameEnd(self: *PPU, dots: u8) usize {
     // Calculate dots until the end of the current HBlank
     const next_frame = 70220;
 
     if (self.frame_dots + dots < next_frame) {
-        // return
         self.frame_dots += dots;
         self.bus.LY = @divFloor(self.frame_dots, 456);
-        return 0;
+        return dots;
     } else {
         // Frame ends somewhere in the next few dots
         defer self.frame_dots = 0;
@@ -129,7 +131,7 @@ fn waitForFrameEnd(self: *PPU, dots: u8) usize {
         self.bus.LY = 0;
 
         // calculate remaining dots for this step
-        return (self.frame_dots + dots) - next_frame;
+        return next_frame - self.frame_dots;
     }
 }
 
@@ -153,13 +155,11 @@ fn waitForOamScanEnd(self: *PPU, dots: u8) usize {
     // Calculate dots until the end of the current HBlank
     if (self.scanline_dots + dots < 80) {
         self.scanline_dots += dots;
-        return 0;
+        return dots;
     } else {
         // OAM Scan is done
         self.state = .{ .Draw = PixelFifo.init(self) };
-        self.tile_x = 0;
-        self.tile_y = 0;
-        return (dots + self.scanline_dots) - 80;
+        return 80 - self.scanline_dots;
     }
 }
 
@@ -173,7 +173,7 @@ const FifoState = enum {
     Push,
 
     // advance State Machine
-    fn next(self: *FifoState) FifoState {
+    fn next(self: *FifoState) void {
         var next_state = @intFromEnum(self) + 1;
         if (next_state > 4) next_state = 0;
         self = @enumFromInt(next_state);
@@ -189,10 +189,14 @@ const PixelFifo = struct {
     fetch_x: u8 = 0, // Position within the 32-tile map row
 
     // Current tile data being processed
-    tile: Tile = [_]u8{0} ** 16,
+    tile_id: u8,
+    tile_low: u8,
+    tile_high: u8,
 
-    // FIFO for holding pixels
-    bg_fifo: [16]u8 = [_]u8{0} ** 16,
+    // FIFO for holding pixels (1 pixel = 2 bits)
+    bg_fifo: [4]u2 = [_]u2{0} ** 4,
+
+    // number of pixels in FIFO
     bg_fifo_size: u8 = 0,
 
     // reference to PPU data
@@ -204,59 +208,72 @@ const PixelFifo = struct {
         return fifo;
     }
 
-    /// Helper function to copy Tile data from map to tiles slice
-    fn mapToTiles(tile_map: []const u8, tiles: []u8, block0: []const Tile, block1: []const Tile) void {
-        for (tile_map, 0..) |id, index| {
-            // id specifies which tile in the tile data we want
-            if (id > 127) {
-                tiles[index] = block1[id - 128];
-            } else {
-                tiles[index] = block0[id];
-            }
-        }
-    }
-
     /// Fetch the tile that contains the pixel being pushed to the FIFO
-    fn getTile(self: *PixelFifo) void {
+    fn getTile(self: *PixelFifo) usize {
         const WX = self.ppu.bus.WX;
         const WY = self.ppu.bus.WY;
         const LY = self.ppu.bus.LY;
+        const LCDC = self.ppu.bus.LCDC;
+        const VRAM = self.ppu.bus.vram;
 
+        // Check if the window is overlayed at the current pixel
+        if (LCDC.window_enable and LY >= WY and self.fetch_x >= WX - 7) {
+            // fetch window tile
+            // determine tile map
+            const win_map = if (LCDC.window_map == 0) VRAM[0x1800..0x1C00] else VRAM[0x1C00..0x2000];
+            // get tile id
+            const id = win_map[32 * WY + (WX - 7)];
+            // fetch actual tile
+            self.tile_id = id;
+        } else {
+            // fetch bg tile
+            const SCY = self.ppu.bus.SCY;
+            const SCX = self.ppu.bus.SCX;
+            const bg_y = (LY + SCY) & 255;
+            const bg_x = (SCX / 8) + self.fetch_x & 31;
+
+            const bg_map = if (LCDC.bg_map == 0) VRAM[0x1800..0x1C00] else VRAM[0x1C00..0x2000];
+            const id = bg_map[bg_y * 32 + bg_x];
+            self.tile_id = id;
+        }
+
+        // done with this step, so advance the state
+        self.state.next();
+        self.fetch_x += 1;
+
+        // consume 2 dots
+        return 2;
+    }
+
+    // Attempt to read VRAM (if accessible) for Tile data
+    fn getDataLow(self: *PixelFifo) usize {
         const VRAM = self.ppu.bus.vram;
         const TILE_DATA: []Tile = @ptrCast(VRAM[0..0x1800]);
         const BLOCK0: [128]Tile = if (self.ppu.bus.LCDC.tiles == 1) TILE_DATA[0..0x800] else TILE_DATA[0x1000..0x1800];
         const BLOCK1: [128]Tile = TILE_DATA[0x0800..0x1000];
 
-        // Check if the window is overlayed at the current pixel
-        if (self.ppu.bus.LCDC.window_enable and LY >= WY and self.fetch_x >= WX - 7) {
-            // fetch window tile
-            // determine tile map
-            const win_map = if (self.bus.LCDC.window_map == 0) VRAM[0x1800..0x1C00] else VRAM[0x1C00..0x2000];
-            // get tile id
-            const id = win_map[32 * WY + (WX - 7)];
-            // fetch actual tile
-            self.tile = if (id > 127) BLOCK1[id - 128] else BLOCK0[id];
+        if (self.ppu.bus.vramAccessible()) {
+            const tile = if (self.tile_id > 127) BLOCK1[self.tile_id - 128] else BLOCK0[self.tile_id];
+            const pixel_row = self.ppu.bus.LY % 8;
+            self.tile_low = tile[pixel_row * 2];
         } else {
-            // fetch bg tile
-            const SCY = self.ppu.bus.SCY;
-            const SCX = self.ppu.bus.SCX;
-            const bg_map = if (self.ppu.bus.LCDC.bg_map == 0) VRAM[0x1800..0x1C00] else VRAM[0x1C00..0x2000];
-            const id = bg_map[((LY + SCY) & 255) * 32 + (SCX / 8) + self.fetch_x];
-            self.tile = if (id > 127) BLOCK1[id - 128] else BLOCK0[id];
+            self.tile_low = 0xFF;
         }
+
+        return 2;
     }
 
-    fn getWindowTile() void {}
-
-    fn getBackgroundTile() void {}
-
-    /// Check LCDC and return the appropriate Tile Map
-    fn getWindowTileMap(self: *PixelFifo) []u8 {
-        return if (self.bus.LCDC.window_map == 0) self.bus.vram[0x1800..0x1C00] else self.bus.vram[0x1C00..0x2000];
+    /// Attempt to read VRAM (if accessible) for Tile data
+    fn getDataHigh() usize {
+        // TODO: Pandocs say something about pushing to FIFO here
+        // NOTE: read tile through bus, for access check
+        return 2;
     }
 
-    /// Check LCDC and return the appropriate Tile Map
-    fn getBackgroundTileMap(self: *PixelFifo) []u8 {
-        return if (self.bus.LCDC.bg_map == 0) self.bus.vram[0x1800..0x1C00] else self.bus.vram[0x1C00..0x2000];
+    fn push(self: *PixelFifo) usize {
+        // Determine which row of 8 pixels in the Tile need to be pushed
+        const pixel_row = self.ppu.bus.LY % 8;
+
+        return 2;
     }
 };

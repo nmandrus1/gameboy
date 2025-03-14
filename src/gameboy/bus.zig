@@ -57,14 +57,6 @@ const LCDStatus = packed struct {
     // read only
     lyc_eq_ly: u1 = 0,
     ppu_mode: u2 = 0,
-
-    fn vramAccessible(self: LCDStatus) bool {
-        return self.STAT.ppu_mode != 3;
-    }
-
-    fn oamAccessible(self: LCDStatus) bool {
-        return self.STAT.ppu_mode < 2;
-    }
 };
 
 const LCDControl = packed struct {
@@ -185,7 +177,7 @@ pub fn read(self: *Bus, addr: u16) u8 {
         // ROM
         0x0000...0x7FFF => self.cart.read(addr),
         // VRAM
-        0x8000...0x9FFF => if (self.STAT.vramAccessible()) self.vram[addr - 0x8000] else 0xFF,
+        0x8000...0x9FFF => if (self.vramAccessible()) self.vram[addr - 0x8000] else 0xFF,
         // Cartridge RAM
         0xA000...0xBFFF => self.cart.read(addr),
         // Work RAM
@@ -193,7 +185,7 @@ pub fn read(self: *Bus, addr: u16) u8 {
         // Echo RAM (mirror of C000-DDFF)
         0xE000...0xFDFF => 0xFF,
         // Object attribute memory (OAM)
-        0xFE00...0xFE9F => if (self.STAT.oamAccessible()) self.oam[addr - 0xFE00] else 0xFF,
+        0xFE00...0xFE9F => if (self.oamAccessible()) self.oam[addr - 0xFE00] else 0xFF,
         // Not Usable
         0xFEA0...0xFEFF => 0xFF,
         // I/O Registers
@@ -228,6 +220,14 @@ pub fn read(self: *Bus, addr: u16) u8 {
         0xFFFF => @bitCast(self.IE),
         else => 0xFF,
     };
+}
+
+fn vramAccessible(self: Bus) bool {
+    return self.STAT.ppu_mode != 3;
+}
+
+fn oamAccessible(self: Bus) bool {
+    return self.STAT.ppu_mode < 2;
 }
 
 fn writeLCDStatus(self: *Bus, value: u8) void {
